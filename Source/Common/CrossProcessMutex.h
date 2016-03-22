@@ -29,31 +29,36 @@ public:
     }
 
     // Acquires the mutex. If 'wait' is true and mutex is acquired by someone else then
-    // function waits until mutex is releasd
-    // Returns true if successfull
+    // function waits until mutex is released
+    // Returns false if !wait and lock cannot be acquired, or in case of a system error that prevents us from acquiring the lock.
     bool Acquire(bool wait)
     {
         assert(m_handle == NULL);
         m_handle = ::CreateMutexA(NULL /*security attr*/, FALSE /*bInitialOwner*/, m_name.c_str());
         if (m_handle == NULL)
         {
-            return false;
+            if (!wait)
+                return false;   // can't lock due to access permissions: lock already exists, consider not available
+            else
+                RuntimeError("Acquire: Failed to create named mutex %s: %d.", m_name.c_str(), GetLastError());
         }
 
         if (::WaitForSingleObject(m_handle, wait ? INFINITE : 0) != WAIT_OBJECT_0)
         {
+            // failed to acquire
             ::CloseHandle(m_handle);
             m_handle = NULL;
             return false;
         }
 
-        return true;
+        return true;   // succeeded
     }
 
     // Releases the mutex
     void Release()
     {
         assert(m_handle != NULL);
+        // TODO: Check for error code and throw if !std::uncaught_exception()
         ::ReleaseMutex(m_handle);
         ::CloseHandle(m_handle);
         m_handle = NULL;
@@ -112,8 +117,8 @@ public:
     }
 
     // Acquires the mutex. If 'wait' is true and mutex is acquired by someone else then
-    // function waits until mutex is releasd
-    // Returns true if successfull
+    // function waits until mutex is released
+    // Returns false if !wait and lock cannot be acquired, or in case of a system error that prevents us from acquiring the lock.
     bool Acquire(bool wait)
     {
         assert(m_fd == -1);
@@ -122,9 +127,7 @@ public:
             // opening a lock file
             int fd = open(m_fileName.c_str(), O_WRONLY | O_CREAT, 0666);
             if (fd < 0)
-            {
-                return false;
-            }
+                RuntimeError("Acquire: Failed to open lock file %s: %s.", m_fileName.c_str(), strerror(errno));
             // locking it with the fcntl API
             memset(&m_lock, 0, sizeof(m_lock));
             m_lock.l_type = F_WRLCK;
@@ -178,6 +181,7 @@ public:
         m_lock.l_type = F_UNLCK;
         // Now removing the lock and closing the file descriptor
         // waiting processes will be notified
+        // TODO: Check for error code and throw if !std::uncaught_exception()
         fcntl(m_fd, F_SETLKW, &m_lock);
         close(m_fd);
         m_fd = -1;

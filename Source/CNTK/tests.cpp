@@ -18,7 +18,7 @@
 #include "SGD.h"
 #include "SimpleEvaluator.h"
 #include "NetworkDescriptionLanguage.h"
-#include "SynchronousExecutionEngine.h"
+#include "NDLNetworkBuilder.h"
 
 using namespace std;
 using namespace Microsoft::MSR::CNTK;
@@ -107,7 +107,7 @@ void TestReader(const ConfigParameters& configBase)
         epochSize = requestDataSize;
     }
 
-    DataReader<ElemType> dataReader(readerConfig);
+    DataReader dataReader(readerConfig);
 
     // get names of features and labels
     std::vector<std::wstring> featureNames;
@@ -115,11 +115,12 @@ void TestReader(const ConfigParameters& configBase)
     GetFileConfigNames(readerConfig, featureNames, labelNames);
 
     // setup minibatch matrices
-    Matrix<ElemType> featuresMatrix;
-    Matrix<ElemType> labelsMatrix;
-    std::map<std::wstring, Matrix<ElemType>*> matrices;
-    matrices[featureNames[0]] = &featuresMatrix;
-    matrices[labelNames[0]] = &labelsMatrix;
+    int deviceId = 0;
+    auto featuresMatrix = make_shared<Matrix<ElemType>>(deviceId);
+    auto labelsMatrix   = make_shared<Matrix<ElemType>>(deviceId);
+    StreamMinibatchInputs matrices;
+    matrices.AddInputMatrix(featureNames[0], featuresMatrix);
+    matrices.AddInputMatrix(labelNames[0],   labelsMatrix);
 
     auto start = std::chrono::system_clock::now();
     int epochs = config("maxEpochs");
@@ -130,8 +131,8 @@ void TestReader(const ConfigParameters& configBase)
         int i = 0;
         while (dataReader.GetMinibatch(matrices))
         {
-            Matrix<ElemType>& features = *matrices[featureNames[0]];
-            Matrix<ElemType>& labels = *matrices[labelNames[0]];
+            Matrix<ElemType>& features = matrices.GetInputMatrix<ElemType>(featureNames[0]);
+            Matrix<ElemType>& labels   = matrices.GetInputMatrix<ElemType>(labelNames[0]);
 
             if (labels.GetNumRows() == 0)
             {
@@ -170,18 +171,18 @@ void TestSequenceReader(const ConfigParameters& configBase)
         std::vector<std::wstring> labelNames;
         GetFileConfigNames(readerConfig, featureNames, labelNames);
 
-        DataReader<ElemType> dataReader(readerConfig);
+        DataReader dataReader(readerConfig);
 
         // get names of features and labels
         std::vector<std::wstring> files;
         files.push_back(readerConfig(L"file"));
 
         // setup minibatch matrices
-        Matrix<ElemType> featuresMatrix;
-        Matrix<ElemType> labelsMatrix;
-        std::map<std::wstring, Matrix<ElemType>*> matrices;
-        matrices[featureNames[0]] = &featuresMatrix;
-        matrices[labelNames[1]] = &labelsMatrix;
+        auto featuresMatrix = make_shared<Matrix<ElemType>>();
+        auto labelsMatrix   = make_shared<Matrix<ElemType>>();
+        StreamMinibatchInputs matrices;
+        matrices.AddInputMatrix(featureNames[0], featuresMatrix);
+        matrices.AddInputMatrix(labelNames[1]  , labelsMatrix);
 
         auto start = std::chrono::system_clock::now();
         int epochs = config("maxEpochs");
@@ -189,13 +190,11 @@ void TestSequenceReader(const ConfigParameters& configBase)
         for (int epoch = 0; epoch < epochs; epoch++)
         {
             dataReader.StartMinibatchLoop(mbSize, epoch, epochSize);
-            int i = 0;
-            while (dataReader.GetMinibatch(matrices))
+            for (int i = 0; dataReader.GetMinibatch(matrices); i++)
             {
-                Matrix<ElemType>& features = *matrices[featureNames[0]];
-                Matrix<ElemType>& labels = *matrices[labelNames[1]];
-
-                fprintf(stderr, "%4d: features dim: %lu x %lu - [%.8g, %.8g, ...] label dim: %d x %d - [%d, %d, ...]\n", i++, features.GetNumRows(), features.GetNumCols(), features(0, 0), features(0, 1), labels.GetNumRows(), labels.GetNumCols(), (int) labels(0, 0), (int) labels(0, 1));
+                auto& features = matrices.GetInputMatrix<ElemType>(featureNames[0]);
+                auto& labels   = matrices.GetInputMatrix<ElemType>(labelNames[1]);
+                fprintf(stderr, "%4d: features dim: %lu x %lu - [%.8g, %.8g, ...] label dim: %d x %d - [%d, %d, ...]\n", i, features.GetNumRows(), features.GetNumCols(), features(0, 0), features(0, 1), labels.GetNumRows(), labels.GetNumCols(), (int) labels(0, 0), (int) labels(0, 1));
             }
         }
         auto end = std::chrono::system_clock::now();
@@ -214,7 +213,7 @@ void TestMacros(const ConfigParameters& configBase)
 {
     NDLScript<ElemType> script = configBase("ndlFull");
     ComputationNetworkPtr net = make_shared<ComputationNetwork>();
-    SynchronousNodeEvaluator<ElemType> nodeEvaluator(net);
+    NDLNodeEvaluatorImpl<ElemType> nodeEvaluator(net);
     script.Evaluate(nodeEvaluator, L"", ndlPassInitial);
 }
 
@@ -258,16 +257,17 @@ void TestConfiguration(const ConfigParameters& configBase)
                 size_t cols = 0;
                 if (!IsParameter(paramsMap, configNode[2]))
                     cols = configNode[2];
-                bool needGradient = false;
+                bool learningRateMultiplier = 0;
                 bool init = false;
                 ConfigArray initData;
 
                 // look for optional parameters
                 for (int i = 3; i < configNode.size(); ++i)
                 {
+                    bool needsGradient = false;
                     ConfigParameters configParam = configNode[i];
-                    if (configParam.Exists("needGradient"))
-                        needGradient = true;
+                    if (configParam.Exists("learningRateMultiplier")) // TODO: should this be a test for 'true' rather than Exists()?
+                        needsGradient = (float)configParam("learningRateMultiplier") > 0? true : false;
                     else if (configParam.Exists("init"))
                     {
                         init = true;
@@ -284,7 +284,7 @@ void TestConfiguration(const ConfigParameters& configBase)
                     if (initData.size() > 0)
                         initValueScale = initData[0];
                     if (initData.size() > 1)
-                        uniform = !_stricmp(initData[1], "uniform");
+                        uniform = EqualCI(initData[1], "uniform");
                 }
             }
         }

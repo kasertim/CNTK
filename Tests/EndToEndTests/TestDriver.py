@@ -10,11 +10,11 @@
 #
 # ---- Adding the tests: -------
 # File system organization:
-#   Each test suite (e.g. Speech) has its own directory inside Tests
+#   Each test suite (e.g. Speech) has its own directory inside EndToEndTests
 #   Each test (e.g. QuickE2E) has its own directory within test suite
 #
 # Each test directory has a following components:
-#    - testcases.yml - main test confuguration file, whcih defines all test cases
+#    - testcases.yml - main test configuration file, which defines all test cases
 #    - run-test - (run-test) script
 #    - baseline*.txt - baseline files whith a captured expected output of run-test script
 #
@@ -40,7 +40,7 @@
 #   .....
 #
 # ----- pattern language --------
-# Multpile patterns of the same testcase are matching a *single* line of text
+# Multiple patterns of the same testcase are matching a *single* line of text
 # Pattern is essentiually a substring which has to be found in a line
 # if pattern starts with ^ then matching is constrained to look only at the beginning of the line
 #
@@ -95,7 +95,13 @@
 # matching against all test-cases/pattern simulteneously
 #
 
-import sys, os, argparse, traceback, yaml, subprocess, random, re, time, sets
+import sys, os, argparse, traceback, yaml, subprocess, random, re, time, stat
+
+try:
+  import six
+except ImportError:
+  print("Python package 'six' not installed. Please run 'pip install six'.")
+  sys.exit(1)
 
 thisDir = os.path.dirname(os.path.realpath(__file__))
 windows = os.getenv("OS")=="Windows_NT"
@@ -128,13 +134,13 @@ class Test:
 
     # parsing test cases
     self.testCases = []
-    if "testCases" in self.rawYamlData.keys():
+    if "testCases" in list(self.rawYamlData.keys()):
       testCasesYaml = self.rawYamlData["testCases"]
-      for name in testCasesYaml.keys():
+      for name in list(testCasesYaml.keys()):
         try:
           self.testCases.append(TestCase(name, testCasesYaml[name]))
         except Exception as e:
-          print >>sys.stderr, "ERROR registering test case: " + name
+          six.print_("ERROR registering test case: " + name, file=sys.stderr)
           raise 
 
     # parsing all tags, example input:
@@ -157,7 +163,7 @@ class Test:
         try:
           assert(type(predicate(flavor='foo', device='bar', os='foobar', build_sku='qux')) == bool)
         except Exception as e:
-          print "Can't parse tag predicate expression in {0} ({1}):\n{2}".format(pathToYmlFile, pythonExpr, e)
+          six.print_("Can't parse tag predicate expression in {0} ({1}):\n{2}".format(pathToYmlFile, pythonExpr, e))
           raise e
 
         # saving generated lambda into tags dictionary
@@ -178,7 +184,7 @@ class Test:
           test = Test(suiteName,  testName, dirName + "/testcases.yml")
           Test.allTestsIndexedByFullName[test.fullName.lower()] = test
         except Exception as e:
-          print >>sys.stderr, "ERROR registering test: " + dirName
+          six.print_("ERROR registering test: " + dirName, file=sys.stderr)
           traceback.print_exc()
           sys.exit(1)
 
@@ -208,7 +214,7 @@ class Test:
       with open(baselineFile, "r") as f:
         baseline = f.read().split("\n")
         if args.verbose:
-           print "Baseline:", baselineFile
+           six.print_("Baseline: " + baselineFile)
 
     # Before running the test, pre-creating TestCaseRunResult object for each test case
     # and compute filtered lines from baseline file.
@@ -230,11 +236,22 @@ class Test:
     os.environ["TEST_DEVICE"] = device
     os.environ["TEST_BUILD_LOCATION"] = args.build_location
     if windows:
-      os.environ["TEST_CNTK_BINARY"] = os.path.join(args.build_location, flavor, "cntk.exe")
+      if args.build_sku == "cpu":
+        os.environ["TEST_CNTK_BINARY"] = os.path.join(args.build_location, (flavor + "_CpuOnly"), "cntk.exe")
+      else:
+        os.environ["TEST_CNTK_BINARY"] = os.path.join(args.build_location, flavor, "cntk.exe")
       os.environ["MPI_BINARY"] = os.path.join(os.environ["MSMPI_BIN"], "mpiexec.exe")
     else:
-      os.environ["TEST_CNTK_BINARY"] = os.path.join(args.build_location, flavor, "bin", "cntk")
+      tempPath = os.path.join(args.build_location, args.build_sku, flavor, "bin", "cntk")
+      if not os.path.isfile(tempPath):
+        for bsku in ["/build/gpu/", "/build/cpu/", "/build/1bitsgd/"]:
+          if tempPath.find(bsku) >= 0:
+            tempPath = tempPath.replace(bsku, "/build/")
+            break
+      os.environ["TEST_CNTK_BINARY"] = tempPath
       os.environ["MPI_BINARY"] = "mpiexec"
+    if not os.path.exists(os.environ["TEST_CNTK_BINARY"]):
+      raise ValueError("the cntk executable does not exist at path '%s'"%os.environ["TEST_CNTK_BINARY"]) 
     os.environ["TEST_DIR"] = self.testDir
     os.environ["TEST_DATA_DIR"] = self.dataDir
     os.environ["TEST_RUN_DIR"] = runDir
@@ -246,8 +263,12 @@ class Test:
     logFile = os.path.join(runDir, "output.txt")
     allLines = []
     if args.verbose:
-      print self.fullName + ":>" + logFile
+      six.print_(self.fullName + ":>" + logFile)
     with open(logFile, "w") as output:
+      if not windows:
+        testScript = self.testDir + "/run-test"
+        st = os.stat(testScript)
+        os.chmod(testScript, st.st_mode | stat.S_IEXEC | stat.S_IXOTH)
       cmdLine = ["bash", "-c", self.testDir + "/run-test 2>&1"]
       process = subprocess.Popen(cmdLine, stdout=subprocess.PIPE)
 
@@ -260,13 +281,13 @@ class Test:
           line=line[:len(line)-1]
 
         if args.verbose:
-          print self.fullName + ": " + line
+          six.print_(self.fullName + ": " + line)
 
         if args.dry_run:
-          print line
+          print (line)
           continue
 
-        print >>output, line
+        six.print_(line, file=output)
         allLines.append(line)
         output.flush()
         for testCaseRunResult in result.testCaseRunResults:
@@ -281,7 +302,7 @@ class Test:
     # checking exit code
     if exitCode != 0:
       if args.dry_run:
-        print "[SKIPPED]"
+        six.print_("[SKIPPED]")
         return result
       else:
         return TestRunResult.fatalError("Exit code must be 0", "==> got exit code {0} when running: {1}".format(exitCode, " ".join(cmdLine)), logFile = logFile)
@@ -292,7 +313,7 @@ class Test:
       if not testCaseRunResult.succeeded:
         result.succeeded = False
 
-    if (self.testCases)>0 and args.update_baseline and result.succeeded:
+    if len(self.testCases)>0 and args.update_baseline and result.succeeded:
       # When running in --update-baseline mode 
       # verifying that new output is succesfully matching every pattern in the testcases.yml
       # If this is not the case then baseline update will be rejected
@@ -304,7 +325,7 @@ class Test:
 
       if result.succeeded:
        if args.verbose:
-         print "Updating baseline file", baselineFile
+         six.print_("Updating baseline file " + baselineFile)
        with open(baselineFile, "w") as f:
          f.write("\n".join(allLines))
 
@@ -334,7 +355,7 @@ class Test:
   def matchesTag(self, tag, flavor, device, os, build_sku):
     tagL = tag.lower() # normalizing the tag for comparison
     # enumerating all the tags
-    for tag in self.tags.keys():
+    for tag in list(self.tags.keys()):
       # match by direct string comparison or by prefix matching rule: 
       # e.g: 'bvt' matches 'bvt' 'bvt-a', 'bvt-b' but not 'bvtx'
       if tag==tagL or tag.startswith(tagL + "-"):
@@ -353,7 +374,7 @@ class TestCase:
         try:
           self.patterns.append(TestPattern(pattern))
         except Exception as e:
-          print >>sys.stderr, "ERROR registering pattern: " + pattern
+          six.print_("ERROR registering pattern: " + pattern, file=sys.stderr)
           raise
 
   # Processes the baseline file and return an instance of TestCaseRunResult
@@ -394,14 +415,14 @@ class TestCase:
                                "Output:   {1}\n"
                               ).format(expected, line)
           if verbose:
-            print "[FAILED]: Testcase", self.name
-            print "Baseline:", expected
+            six.print_("[FAILED]: Testcase " + self.name)
+            six.print_("Baseline: " + expected)
      
           # also show all failed patterns
           for p in failedPatterns:
             msg = "Failed pattern: " + p.patternText
             if verbose:
-              print msg
+              print (msg)
             result.diagnostics+=msg+"\n"
         # removing this line, since we already matched it (whether succesfully or not - doesn't matter)
         del result.expectedLines[0]
@@ -473,11 +494,16 @@ class TestPattern:
   # Checks wether given line matches this pattern
   # returns True or False
   def match(self, line):
+    if type(line) == bytes:
+      line = line.decode("utf-8") 
     return self.regex.match(line) != None
 
   # Compares a line from baseline log and a line from real output against this pattern
   # return true or false
   def compare(self, expected, actual):
+    if type(actual) == bytes:
+      actual = actual.decode("utf-8") 
+    #import pdb;pdb.set_trace()
     em = self.regex.match(expected)
     am = self.regex.match(actual)
     if em == None and am == None:
@@ -522,50 +548,55 @@ class TestCaseRunResult:
 # Lists all available tests
 def listCommand(args):
   testsByTag = {}
-  for test in Test.allTestsIndexedByFullName.values():
+  for test in list(Test.allTestsIndexedByFullName.values()):
      for flavor in args.flavors:
         for device in args.devices:
            for os in args.oses:
              for build_sku in args.buildSKUs:
+               if build_sku=="cpu" and device=="gpu":
+                 continue
                tag = test.matchesTag(args.tag, flavor, device, os, build_sku) if args.tag else '*'
                if tag:
-                 if tag in testsByTag.keys():
+                 if tag in list(testsByTag.keys()):
                    testsByTag[tag].add(test.fullName)
                  else:
-                   testsByTag[tag] = sets.Set([test.fullName])
+                   testsByTag[tag] = set([test.fullName])
   for tag in sorted(testsByTag.keys()):
     if tag=="*":
-      print ' '.join(sorted(testsByTag[tag]))
+      six.print_(' '.join(sorted(testsByTag[tag])))
     else:
-      print tag+":", ' '.join(sorted(testsByTag[tag]))
+      six.print_(tag + ": " + ' '.join(sorted(testsByTag[tag])))
 
 # Runs given test(s) or all tests
 def runCommand(args):
   if len(args.test) > 0:
      testsToRun = []
      for name in args.test:
+       if name[len(name)-1] == '/':
+         name = name[:-1]
        if name.lower() in Test.allTestsIndexedByFullName:
          testsToRun.append(Test.allTestsIndexedByFullName[name.lower()])
        else:
-         print >>sys.stderr, "ERROR: test not found", name
+         six.print_("ERROR: test not found", name, file=sys.stderr)
          return 1
   else:
-     testsToRun = Test.allTestsIndexedByFullName.values()
+     testsToRun = list(Test.allTestsIndexedByFullName.values())
 
   devices = args.devices
   flavors = args.flavors
 
   os.environ["TEST_ROOT_DIR"] = os.path.dirname(os.path.realpath(sys.argv[0]))
 
-  print "CNTK Test Driver is started"
-  print "Running tests:  ", " ".join([y.fullName for y in testsToRun])
-  print "Build location: ", args.build_location
-  print "Run location:   ", args.run_dir
-  print "Flavors:        ", " ".join(flavors)
-  print "Devices:        ", " ".join(devices)
+  print ("CNTK Test Driver is started")
+  six.print_("Running tests:  " + " ".join([y.fullName for y in testsToRun]))
+  six.print_("Build location: " + args.build_location)
+  six.print_("Build SKU:      " + args.build_sku)
+  six.print_("Run location:   " + args.run_dir)
+  six.print_("Flavors:        " + " ".join(flavors))
+  six.print_("Devices:        " + " ".join(devices))
   if (args.update_baseline):
-    print "*** Running in automatic baseline update mode ***"
-  print ""
+    print ("*** Running in automatic baseline update mode ***")
+  print ("")
   if args.dry_run:
     os.environ["DRY_RUN"] = "1"
   succeededCount, totalCount = 0, 0
@@ -575,6 +606,8 @@ def runCommand(args):
         for build_sku in args.buildSKUs:
           if args.tag and args.tag != '' and not test.matchesTag(args.tag, flavor, device, 'windows' if windows else 'linux', build_sku):
             continue
+          if build_sku=="cpu" and device=="gpu":
+            continue
           totalCount = totalCount + 1
           if len(test.testCases)==0:
             # forcing verbose mode (showing all output) for all test which are based on exit code (no pattern-based test cases)
@@ -582,7 +615,7 @@ def runCommand(args):
           # Printing the test which is about to run (without terminating the line)
           sys.stdout.write("Running test {0} ({1} {2}) - ".format(test.fullName, flavor, device));
           if args.dry_run:
-            print "[SKIPPED] (dry-run)"
+            print ("[SKIPPED] (dry-run)")
           # in verbose mode, terminate the line, since there will be a lot of output
           if args.verbose:
             sys.stdout.write("\n");
@@ -596,30 +629,30 @@ def runCommand(args):
           if result.succeeded:
             succeededCount = succeededCount + 1
             # in no-verbose mode this will be printed in the same line as 'Running test...'
-            print "[OK] {0:.2f} sec".format(result.duration)
+            six.print_("[OK] {0:.2f} sec".format(result.duration))
           else:
-            print "[FAILED] {0:.2f} sec".format(result.duration)
+            six.print_("[FAILED] {0:.2f} sec".format(result.duration))
           # Showing per-test-case results:
           for testCaseRunResult in result.testCaseRunResults:
             if testCaseRunResult.succeeded:
               # Printing 'OK' test cases only in verbose mode
               if (args.verbose):
-                print(" [OK] " + testCaseRunResult.testCaseName);
+                six.print_(" [OK] " + testCaseRunResult.testCaseName)
             else:
               # 'FAILED' + detailed diagnostics with proper indendtation
-              print(" [FAILED] " + testCaseRunResult.testCaseName);
+              six.print_(" [FAILED] " + testCaseRunResult.testCaseName)
               if testCaseRunResult.diagnostics:
                 for line in testCaseRunResult.diagnostics.split('\n'):
-                  print "    " + line;
+                  six.print_("    " + line);
               # In non-verbose mode log wasn't piped to the stdout, showing log file path for conveniencce
                
           if not result.succeeded and not args.verbose and result.logFile:
-            print "  See log file for details:", result.logFile
+            six.print_("  See log file for details: " + result.logFile)
         
   if args.update_baseline:
-    print "{0}/{1} baselines updated, {2} failed".format(succeededCount, totalCount, totalCount - succeededCount)
+    six.print_("{0}/{1} baselines updated, {2} failed".format(succeededCount, totalCount, totalCount - succeededCount))
   else:
-    print "{0}/{1} tests passed, {2} failed".format(succeededCount, totalCount, totalCount - succeededCount)
+    six.print_("{0}/{1} tests passed, {2} failed".format(succeededCount, totalCount, totalCount - succeededCount))
   if succeededCount != totalCount:
     sys.exit(10)
 
@@ -633,9 +666,8 @@ runSubparser.add_argument("test", nargs="*",
                          "If not specified then all tests will be run.")
 
 defaultBuildSKU = "gpu"
-defaultBuildLocation=os.path.realpath(os.path.join(thisDir, "../..", "x64" if windows else "build/"+defaultBuildSKU))
 
-runSubparser.add_argument("-b", "--build-location", default=defaultBuildLocation, help="location of the CNTK build to run")
+runSubparser.add_argument("-b", "--build-location", help="location of the CNTK build to run")
 runSubparser.add_argument("-t", "--tag", help="runs tests which match the spacified tag")
 runSubparser.add_argument("-d", "--device", help="cpu|gpu - run on a specified device")
 runSubparser.add_argument("-f", "--flavor", help="release|debug - run only a specified flavor")
@@ -669,7 +701,7 @@ args.devices = ["cpu", "gpu"]
 if (args.device):
   args.device = args.device.lower()
   if not args.device in args.devices:
-    print >>sys.stderr, "--device must be one of", args.devices
+    six.print_("--device must be one of", args.devices, file=sys.stderr)
     sys.exit(1)
   args.devices = [args.device]
 
@@ -677,7 +709,7 @@ args.flavors = ["debug", "release"]
 if (args.flavor):
   args.flavor = args.flavor.lower()
   if not args.flavor in args.flavors:
-    print >>sys.stderr, "--flavor must be one of", args.flavors
+    six.print_("--flavor must be one of", args.flavors, file=sys.stderr)
     sys.exit(1)
   args.flavors = [args.flavor]
 
@@ -685,19 +717,22 @@ args.buildSKUs = ["cpu", "gpu", "1bitsgd"]
 if (args.build_sku):
   args.build_sku = args.build_sku.lower()
   if not args.build_sku in args.buildSKUs:
-    print >>sys.stderr, "--build-sku must be one of", args.buildSKUs
+    six.print_("--build-sku must be one of", args.buildSKUs, file=sys.stderr)
     sys.exit(1)
-  if args.func == runCommand:
-    if (args.build_location == defaultBuildLocation):
-      args.build_location = os.path.realpath(os.path.join(thisDir, "../..", "x64" if windows else "build/"+args.build_sku))
   args.buildSKUs = [args.build_sku]
+  if args.build_sku == "cpu" and args.devices == ["gpu"]:
+    print >>sys.stderr, "Invalid combination: --build-sku cpu and --device gpu"
+    sys.exit(1)
+
+if args.func == runCommand and not args.build_location:
+  args.build_location = os.path.realpath(os.path.join(thisDir, "../..", "x64" if windows else "build/"))
 
 if args.func == listCommand:
   args.oses = ["windows", "linux"]
   if (args.os):
     args.os = args.os.lower()
     if not args.os in args.oses:
-      print >>sys.stderr, "--os must be one of", args.oses
+      six.print_("--os must be one of", args.oses, file=sys.stderr)
       sys.exit(1)
   args.oses = [args.os]
 

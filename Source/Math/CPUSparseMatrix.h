@@ -22,21 +22,21 @@ namespace Microsoft { namespace MSR { namespace CNTK {
 template <class ElemType>
 class MATH_API CPUSparseMatrix : public BaseMatrix<ElemType>
 {
-    typedef BaseMatrix<ElemType> B;
-    using B::m_elemSizeAllocated;
-    using B::m_computeDevice;
-    using B::m_externalBuffer;
-    using B::m_format;
-    using B::m_matrixName;
-    using B::m_numCols;
-    using B::m_numRows;
-    using B::m_nz;
-    using B::m_pArray; // without this, base members would require to use thi-> in GCC
-    using B::OwnBuffer;
-    using B::Clear;
+    typedef BaseMatrix<ElemType> Base;
+    using Base::m_elemSizeAllocated;
+    using Base::m_computeDevice;
+    using Base::m_externalBuffer;
+    using Base::m_format;
+    using Base::m_numCols;
+    using Base::m_numRows;
+    using Base::m_nz;
+    using Base::m_pArray; // without this, base members would require to use thi-> in GCC
+    using Base::Clear;
+    using Base::NzCount;
 
 public:
-    using B::SetMatrixName;
+    using Base::OwnBuffer;
+    using Base::IsEmpty;
 
 private:
     void ZeroInit();
@@ -44,7 +44,7 @@ private:
     void ReleaseMemory();
 
 public:
-    CPUSparseMatrix(const MatrixFormat format);
+    explicit CPUSparseMatrix(const MatrixFormat format);
     CPUSparseMatrix(const MatrixFormat format, const size_t numRows, const size_t numCols, const size_t size);
     CPUSparseMatrix(const CPUSparseMatrix<ElemType>& deepCopyFrom);                      // copy constructor, deep copy
     CPUSparseMatrix<ElemType>& operator=(const CPUSparseMatrix<ElemType>& deepCopyFrom); // assignment operator, deep copy
@@ -53,16 +53,11 @@ public:
     ~CPUSparseMatrix();
 
 public:
-    using B::GetNumCols;
-    using B::GetNumRows;
+    using Base::GetNumCols;
+    using Base::GetNumRows;
 
     void SetValue(const size_t row, const size_t col, ElemType val);
     void SetValue(const CPUSparseMatrix<ElemType>& /*val*/);
-
-    void ShiftBy(int /*numShift*/)
-    {
-        NOT_IMPLEMENTED;
-    }
 
     size_t BufferSize() const
     {
@@ -166,8 +161,7 @@ public:
     ElemType SumOfElements() const;    // sum of all elements
 
 public:
-    // void Print(const char* /*matrixName*/) const { NOT_IMPLEMENTED; }
-    void Print(const char* matrixName, size_t rowStart, size_t rowEnd, size_t colStart, size_t colEnd) const;
+    void Print(const char* matrixName, ptrdiff_t rowStart, ptrdiff_t rowEnd, ptrdiff_t colStart, ptrdiff_t colEnd) const;
     void Print(const char* matrixName = NULL) const; // print whole matrix. can be expensive
 
 public:
@@ -249,6 +243,8 @@ private:
     size_t m_blockSize;    // block size
     size_t* m_blockIds;    // block ids
     size_t m_blockIdShift; // used to get efficient slice, actual col = blockIds[j] - m_blockIdShift
+
+    CPUSparseMatrix* m_sliceOf; // if this is a slice, then this points to the owning matrix object that we sliced from
 };
 
 typedef CPUSparseMatrix<float> CPUSingleSparseMatrix;

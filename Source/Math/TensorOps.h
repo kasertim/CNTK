@@ -97,6 +97,20 @@ DECL ElemType LinearRectifierDerivative(ElemType z)
 }
 
 template <class ElemType>
+DECL ElemType Sgn(ElemType z)
+{
+    if (z > 0.0) return 1.0;
+    if (z < 0.0) return -1.0;
+    return z;
+}
+
+template <class ElemType>
+DECL ElemType Sqr(ElemType z)
+{
+    return z * z;
+}
+
+template <class ElemType>
 DECL ElemType Sqrt(ElemType z)
 {
     // BUGBUG: Why clip to 0? An invalid sqrt() should show up as a NaN in the result, instead of hiding it.
@@ -143,12 +157,6 @@ DECL ElemType LogAdd(ElemType x, ElemType y)
     }
 }
 
-template <class ElemType>
-DECL ElemType Sqr(ElemType z)
-{
-    return z * z;
-}
-
 // IndexElement reindexes a tensor along one dimension.
 // For the indexed dimension, the tensor op is prepared by setting 'a' to be broadcasting along the indexed dimension.
 // I.e. pa = &a points to the first element (as if index == 0).
@@ -188,11 +196,13 @@ DefUnaryOp(Not, !a);
 DefUnaryOp(Abs, fabs_(a));
 DefUnaryOp(Sigmoid, Sigmoid(a));
 DefUnaryOp(Tanh, tanh_(a));
+DefUnaryOp(Sqr, Sqr(a));
 DefUnaryOp(Sqrt, Sqrt(a));
 DefUnaryOp(Exp, exp_(a));
 DefUnaryOp(Log, ClippedLog(a));
 DefUnaryOp(LinearRectifier, a > 0 ? a : 0);
 DefUnaryOp(Cosine, cos_(a));
+DefUnaryOp(Reciprocal, a == 0 ? 0 : 1 / a);
 #pragma pop_macro("DefUnaryOp")
 
 #pragma push_macro("DefBinaryOp")
@@ -226,6 +236,10 @@ DefBinaryOp(ElementwiseProductWithTanhDerivativeFromOutput, a*(1 - b * b));
 DefBinaryOp(ElementwiseProductWithLinearRectifierDerivativeFromOutput, b > 0 ? a : 0);
 DefBinaryOp(ElementwiseProductWithLogDerivativeFromOutput, a* exp_(-b));
 DefBinaryOp(ElementwiseProductWithCosDerivative, a * -sin_(b)); // note: b = input for cos()
+DefBinaryOp(ElementwiseProductWithAbsDerivative, a * Sgn(b)); // note: b = input for abs()
+DefBinaryOp(ElementwiseProductWithReciprocalDerivative, a * -Sqr(b)); // b = output
+DefBinaryOp(ElementwiseProductWithSqrtDerivative, a / (2 * b)); // b = output; d/dx sqrt(x) = 1/(2 * sqrt(x)) --> note this is the same as ElementwiseQuotient w a constant; if more show up like this we should add more template params
+DefBinaryOp(SqrOfDifference, Sqr(a - b));
 //DefBinaryOp(Index, IndexElement(a, b, i));  // note: this one uses the third argument
 
 #pragma pop_macro("DefBinaryOp")
@@ -240,9 +254,9 @@ DefBinaryOp(ElementwiseProductWithCosDerivative, a * -sin_(b)); // note: b = inp
 
 DefTernaryOp(Cond, a ? b : c);
 DefTernaryOp(Clip, a < b ? b : (a > c ? c : a));
+DefTernaryOp(ElementwiseProductWithLogSumDerivative, a * Sigmoid(c - b));
+
 #pragma pop_macro("DefTernaryOp")
-}
-}
-}
+}}}
 #pragma pop_macro("DECL")
 #pragma pop_macro("TENSOR_OPS_DECL")

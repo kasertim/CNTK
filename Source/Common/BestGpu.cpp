@@ -13,11 +13,11 @@
 //
 
 #define _CRT_SECURE_NO_WARNINGS // "secure" CRT not available on all platforms  --add this at the top of all CPP files that give "function or variable may be unsafe" warnings
+#include "Basics.h"
 #include "Platform.h"
 #include "BestGpu.h"
 #include "Config.h" // for ConfigParameters
 #include "ScriptableObjects.h"
-#include "DebugUtil.h"
 #ifndef CPUONLY
 #pragma comment(lib, "cudart.lib")
 #include <cuda_runtime.h>
@@ -27,7 +27,7 @@
 #else
 int bestGPUDummy = 42; // put something into this CPP, as to avoid a linker warning
 #endif
-#include "CommonMatrix.h" // for CPUDEVICE and AUTOPLACEMATRIX
+#include "CommonMatrix.h" // for CPUDEVICE
 
 #ifndef CPUONLY // #define this to disable GPUs
 
@@ -63,8 +63,7 @@ struct ProcessorData
     cudaDeviceProp deviceProp;
     size_t cudaFreeMem;
     size_t cudaTotalMem;
-    bool dbnFound;
-    bool cnFound;
+    bool cntkFound;
     int deviceId; // the deviceId (cuda side) for this processor
 };
 
@@ -93,13 +92,14 @@ private:
     int m_lastCount;          // count of devices (with filtering of allowed Devices)
     std::vector<ProcessorData*> m_procData;
     int m_allowedDevices; // bitfield of allowed devices
+    bool m_disallowCPUDevice;
     void GetCudaProperties();
     void GetNvmlData();
     void QueryNvmlData();
 
 public:
     BestGpu()
-        : m_initialized(false), m_nvmlData(false), m_cudaData(false), m_deviceCount(0), m_queryCount(0), m_lastFlags(bestGpuNormal), m_lastCount(0), m_allowedDevices(-1)
+        : m_initialized(false), m_nvmlData(false), m_cudaData(false), m_deviceCount(0), m_queryCount(0), m_lastFlags(bestGpuNormal), m_lastCount(0), m_allowedDevices(-1), m_disallowCPUDevice(false)
     {
         Init();
     }
@@ -109,7 +109,12 @@ public:
     bool DeviceAllowed(int device);
     void DisallowDevice(int device)
     {
-        m_allowedDevices &= ~(1 << device);
+        assert((device >= -1) && (device <= 31));
+
+        if (device < 0)
+            m_disallowCPUDevice = true;
+        else
+            m_allowedDevices &= ~(1 << device);
     }
     void AllowAll();                                                                          // reset to allow all GPUs (no allowed list)
     bool UseMultiple();                                                                       // using multiple GPUs?
@@ -127,57 +132,65 @@ private:
 // 'cpu'  - use the CPU
 // 0      - or some other single number, use a single GPU with CUDA ID same as the number
 // This can only be called with the same parameters each time, and 'auto' is determined upon first call.
-static DEVICEID_TYPE SelectDevice(DEVICEID_TYPE deviceId, bool bLockGPU)
+static DEVICEID_TYPE SelectDevice(DEVICEID_TYPE deviceId, bool bLockGPU, const intargvector& excludedDevices)
 {
     // This can only be called with the same parameter.
-    static DEVICEID_TYPE lastDeviceId = DEVICEID_NOTYETDETERMINED;
-    if (lastDeviceId == DEVICEID_NOTYETDETERMINED)
-        lastDeviceId = deviceId;
-    else if (lastDeviceId != deviceId)
-        InvalidArgument("SelectDevice: Attempted to change device selection from %d to %d (%d means 'auto').", (int) lastDeviceId, (int) deviceId, (int) DEVICEID_AUTO);
+    static DEVICEID_TYPE selectedDeviceId = DEVICEID_NOTYETDETERMINED;
+    if (selectedDeviceId == DEVICEID_NOTYETDETERMINED)
+        selectedDeviceId = deviceId;
+    else if (selectedDeviceId != deviceId)
+        InvalidArgument("SelectDevice: Attempted to change device selection from %d to %d (%d means 'auto').", (int)selectedDeviceId, (int)deviceId, (int)DEVICEID_AUTO);
 
     if (deviceId == DEVICEID_AUTO)
     {
         static DEVICEID_TYPE bestDeviceId = DEVICEID_NOTYETDETERMINED;
-        if (bestDeviceId == DEVICEID_NOTYETDETERMINED) // we only choose once
+        // set bestDeviceId once if not set yet
+        if (bestDeviceId == DEVICEID_NOTYETDETERMINED)
         {
             // GPU device to be auto-selected, so init our class
             static BestGpu* g_bestGpu = nullptr;
             if (g_bestGpu == nullptr)
+            {
                 g_bestGpu = new BestGpu();
-            deviceId = (DEVICEID_TYPE)
-                           g_bestGpu->GetDevice(BestGpuFlags(bLockGPU ? (bestGpuAvoidSharing | bestGpuExclusiveLock) : bestGpuAvoidSharing));
-            bestDeviceId = deviceId;
+                for (int i = 0; i < excludedDevices.size(); ++i)
+                {
+                    g_bestGpu->DisallowDevice(excludedDevices[i]);
+                }
+            }
+
+            bestDeviceId = (DEVICEID_TYPE)g_bestGpu->GetDevice(BestGpuFlags(bLockGPU ? (bestGpuAvoidSharing | bestGpuExclusiveLock) : bestGpuAvoidSharing));
+            // TODO: Do we need to hold this pointer at all? We will only query it once. Or is it used to hold lock to a GPU?
         }
-        else // already chosen
-            deviceId = bestDeviceId;
+        // already chosen
+        deviceId = bestDeviceId;
     }
-    // route the result through EnforceOneGPUOnly() which only lets the first choice through (see comment there)
-    return EnforceOneGPUOnly(deviceId);
+
+    return deviceId;
 }
 //#ifdef MATH_EXPORTS
 //__declspec(dllexport)
 //#endif
 DEVICEID_TYPE DeviceFromConfig(const ScriptableObjects::IConfigRecord& config)
 {
+    intargvector excludedDevices = ConfigArray(config(L"excludedDevices", ""), ':', false);
     bool bLockGPU = config(L"lockGPU", true);
     // we need to deal with the old CNTK config semantics where 'deviceId' can be either a string or an int
     auto valpp = config.Find(L"deviceId");
     if (!valpp)
-        return SelectDevice(DEVICEID_AUTO, bLockGPU); // not given at all: default
+        return SelectDevice(DEVICEID_AUTO, bLockGPU, excludedDevices); // not given at all: default
     auto valp = *valpp;                               // (the type is not determined at this point)
     if (valp.Is<ScriptableObjects::String>())
     {
         wstring val = valp;
         if (val == L"cpu")
-            return SelectDevice(CPUDEVICE, false);
+            return SelectDevice(CPUDEVICE, false, excludedDevices);
         else if (val == L"auto")
-            return SelectDevice(DEVICEID_AUTO, bLockGPU);
+            return SelectDevice(DEVICEID_AUTO, bLockGPU, excludedDevices);
         else
             InvalidArgument("Invalid value '%ls' for deviceId parameter. Allowed are 'auto' and 'cpu' (case-sensitive).", val.c_str());
     }
     else
-        return SelectDevice(valp, bLockGPU);
+        return SelectDevice(valp, bLockGPU, excludedDevices);
 }
 // legacy version for old CNTK config
 //#ifdef MATH_EXPORTS
@@ -185,15 +198,13 @@ DEVICEID_TYPE DeviceFromConfig(const ScriptableObjects::IConfigRecord& config)
 //#endif
 DEVICEID_TYPE DeviceFromConfig(const ConfigParameters& config)
 {
+    intargvector excludedDevices = ConfigArray(config("excludedDevices", ""), ':', false);
     ConfigValue val = config("deviceId", "auto");
     bool bLockGPU = config(L"lockGPU", true);
 
-    if (!_stricmp(val.c_str(), "cpu"))
-        return SelectDevice(CPUDEVICE, false);
-    else if (!_stricmp(val.c_str(), "auto"))
-        return SelectDevice(DEVICEID_AUTO, bLockGPU);
-    else
-        return SelectDevice((int) val, bLockGPU);
+    if (EqualCI(val, "cpu"))  return SelectDevice(CPUDEVICE, false, excludedDevices);
+    else if (EqualCI(val, "auto")) return SelectDevice(DEVICEID_AUTO, bLockGPU, excludedDevices);
+    else                           return SelectDevice((int)val, bLockGPU, excludedDevices);
 }
 
 // !!!!This is from helper_cuda.h which comes with CUDA samples!!!! Consider if it is beneficial to just include all helper_cuda.h
@@ -295,6 +306,7 @@ BestGpu::~BestGpu()
 
     if (m_nvmlData)
     {
+        // TODO: Check for error code and throw if !std::uncaught_exception()
         nvmlShutdown();
     }
 }
@@ -321,6 +333,10 @@ void BestGpu::GetNvmlData()
 int BestGpu::GetDevice(BestGpuFlags bestFlags)
 {
     std::vector<int> best = GetDevices(1, bestFlags);
+
+    if (best.empty())
+        RuntimeError("Device selection: No eligible device found.");
+
     return best[0];
 }
 
@@ -339,7 +355,12 @@ void BestGpu::SetAllowedDevices(const std::vector<int>& devices)
 // returns: true if the device is allowed, otherwise false
 bool BestGpu::DeviceAllowed(int device)
 {
-    return !!(m_allowedDevices & (1 << device));
+    assert((device >= -1) && (device <= 31));
+
+    if (device < 0)
+        return !m_disallowCPUDevice;
+    else
+        return !!(m_allowedDevices & (1 << device));
 }
 
 // AllowAll - Reset the allowed filter to allow all GPUs
@@ -378,7 +399,9 @@ std::vector<int> BestGpu::GetDevices(int number, BestGpuFlags p_bestFlags)
     if (m_procData.size() == 0)
     {
         best.clear();
-        best.push_back(-1); // default to CPU
+        if (DeviceAllowed(-1))
+            best.push_back(-1); // default to CPU
+
         return best;
     }
 
@@ -430,7 +453,7 @@ std::vector<int> BestGpu::GetDevices(int number, BestGpuFlags p_bestFlags)
         if (!pd->deviceProp.tccDriver || pd->memory.total == 0)
             mem = pd->cudaFreeMem / (double) pd->cudaTotalMem;
         score += mem * freeMemW;
-        score += ((pd->cnFound || pd->dbnFound) ? 0 : 1) * mlAppRunningW;
+        score += (pd->cntkFound ? 0 : 1) * mlAppRunningW;
         for (int i = 0; i < best.size(); i++)
         {
             // look for a better score
@@ -450,7 +473,7 @@ std::vector<int> BestGpu::GetDevices(int number, BestGpuFlags p_bestFlags)
     }
 
     // now get rid of any extra empty slots and disallowed devices
-    for (int j = (int) best.size() - 1; j > 0; --j)
+    for (int j = (int) best.size() - 1; j >= 0; --j)
     {
         // if this device is not allowed, or never was set remove it
         if (best[j] == -1)
@@ -459,11 +482,11 @@ std::vector<int> BestGpu::GetDevices(int number, BestGpuFlags p_bestFlags)
             break;
     }
 
-    // this code allows only one process to run concurrently on a machine
+    // global lock for this process
     CrossProcessMutex deviceAllocationLock("DBN.exe GPGPU querying lock");
 
     if (!deviceAllocationLock.Acquire((bestFlags & bestGpuExclusiveLock) != 0)) // failure  --this should not really happen
-        RuntimeError("DeviceFromConfig: unexpected failure");
+        RuntimeError("DeviceFromConfig: Unexpected failure acquiring device allocation lock.");
 
     {
         // even if user do not want to lock the GPU, we still need to check whether a particular GPU is locked or not,
@@ -492,7 +515,8 @@ std::vector<int> BestGpu::GetDevices(int number, BestGpuFlags p_bestFlags)
     // if we eliminated all GPUs, use CPU
     if (best.size() == 0)
     {
-        best.push_back(-1);
+        if (DeviceAllowed(-1))
+            best.push_back(-1);
     }
 
     for (int z = 0; z < best.size() && z < number; z++)
@@ -503,7 +527,8 @@ std::vector<int> BestGpu::GetDevices(int number, BestGpuFlags p_bestFlags)
     return best; // return the array of the best GPUs
 }
 
-// QueryNvmlData - Query data from the Nvidia Management Library, and accumulate counters
+// QueryNvmlData - Query data from the Nvidia Management Library, and accumulate counters,
+// In case failure, this function simply backs out without filling in the data structure and without setting m_nvmlData.
 void BestGpu::QueryNvmlData()
 {
     if (!m_cudaData)
@@ -519,17 +544,13 @@ void BestGpu::QueryNvmlData()
         // Query for device handle to perform operations on a device
         nvmlReturn_t result = nvmlDeviceGetHandleByIndex(i, &device);
         if (NVML_SUCCESS != result)
-        {
-            return;
-        }
+            return; // failed: just back out
 
         // pci.busId is very useful to know which device physically you're talking to
         // Using PCI identifier you can also match nvmlDevice handle to CUDA device.
         result = nvmlDeviceGetPciInfo(device, &pci);
         if (NVML_SUCCESS != result)
-        {
             return;
-        }
 
         ProcessorData* curPd = NULL;
         for (ProcessorData* pd : m_procData)
@@ -547,21 +568,17 @@ void BestGpu::QueryNvmlData()
         // Get the memory usage, will only work for TCC drivers
         result = nvmlDeviceGetMemoryInfo(device, &memory);
         if (NVML_SUCCESS != result)
-        {
             return;
-        }
         curPd->memory = memory;
 
         // Get the memory usage, will only work for TCC drivers
         result = nvmlDeviceGetUtilizationRates(device, &utilization);
         if (NVML_SUCCESS != result)
-        {
             return;
-        }
         if (m_queryCount)
         {
             // average, slightly overweighting the most recent query
-            curPd->utilization.gpu = (curPd->utilization.gpu * m_queryCount + utilization.gpu * 2) / (m_queryCount + 2);
+            curPd->utilization.gpu    = (curPd->utilization.gpu    * m_queryCount + utilization.gpu    * 2) / (m_queryCount + 2);
             curPd->utilization.memory = (curPd->utilization.memory * m_queryCount + utilization.memory * 2) / (m_queryCount + 2);
         }
         else
@@ -570,7 +587,7 @@ void BestGpu::QueryNvmlData()
         }
         m_queryCount++;
 
-        unsigned size = 0;
+        unsigned int size = 0;
         result = nvmlDeviceGetComputeRunningProcesses(device, &size, NULL);
         if (size > 0)
         {
@@ -580,11 +597,8 @@ void BestGpu::QueryNvmlData()
                 info.usedGpuMemory = 0;
             result = nvmlDeviceGetComputeRunningProcesses(device, &size, &processInfo[0]);
             if (NVML_SUCCESS != result)
-            {
                 return;
-            }
-            bool cnFound = false;
-            bool dbnFound = false;
+            bool cntkFound = false;
             for (nvmlProcessInfo_t info : processInfo)
             {
                 std::string name;
@@ -597,12 +611,15 @@ void BestGpu::QueryNvmlData()
                     name = name.substr(pos + 1);
                 if (GetCurrentProcessId() == info.pid || name.length() == 0)
                     continue;
-                cnFound = (cnFound || (!name.compare("cn.exe")));
-                dbnFound = (dbnFound || (!name.compare("dbn.exe")));
+#ifdef _WIN32
+                cntkFound = cntkFound || EqualCI(name, "cntk.exe"); // recognize ourselves
+                cntkFound = cntkFound || EqualCI(name, "cn.exe") || EqualCI(name, "dbn.exe"); // also recognize some MS-proprietary legacy tools
+#else
+                cntkFound = cntkFound || name == "cntk"; // (Linux is case sensitive)
+#endif
             }
             // set values to save
-            curPd->cnFound = cnFound;
-            curPd->dbnFound = dbnFound;
+            curPd->cntkFound = cntkFound;
         }
     }
     m_nvmlData = true;
@@ -619,7 +636,7 @@ bool BestGpu::LockDevice(int deviceId, bool trial)
     char buffer[80];
     sprintf(buffer, "DBN.exe GPGPU exclusive lock for device %d", deviceId);
     std::unique_ptr<CrossProcessMutex> mutex(new CrossProcessMutex(buffer));
-    if (!mutex->Acquire(false)) // failure  --this should not really happen
+    if (!mutex->Acquire(/*wait=*/false)) // GPU not available
     {
         fprintf(stderr, "LockDevice: Failed to lock GPU %d for exclusive use.\n", deviceId);
         return false;
@@ -639,7 +656,8 @@ bool BestGpu::LockDevice(int deviceId, bool trial)
 
 #if 0
 // ---------------------------------------------------------------------------
-// some interfacing with the Windows DLL system to ensure clean shutdown vs. Delay loading of CUDA DLLs
+// some interfacing with the Windows DLL system for finding nvml.dll if not in PATH
+// Not needed since the build process copies it.
 // ---------------------------------------------------------------------------
 
 // The "notify hook" gets called for every call to the
@@ -648,12 +666,12 @@ bool BestGpu::LockDevice(int deviceId, bool trial)
 //
 // dliNotify == { dliStartProcessing | dliNotePreLoadLibrary  | dliNotePreGetProc | dliNoteEndProcessing } on this call.
 
-extern "C" INT_PTR WINAPI DelayLoadNofify(
+extern "C" INT_PTR WINAPI DelayLoadNotify(
     unsigned        dliNotify,
     PDelayLoadInfo  pdli
     )
 {
-    // load the library from an alternate path
+    // load nvml.dll from an alternate path
     if (dliNotify == dliNotePreLoadLibrary && !strcmp(pdli->szDll, "nvml.dll"))
     {
         WCHAR *path;
@@ -687,14 +705,13 @@ extern "C" INT_PTR WINAPI DelayLoadNofify(
 }
 
 ExternC
-PfnDliHook __pfnDliNotifyHook2 = (PfnDliHook)DelayLoadNofify;
+PfnDliHook __pfnDliNotifyHook2 = (PfnDliHook)DelayLoadNotify;
 // This is the failure hook, dliNotify = {dliFailLoadLib|dliFailGetProc}
 ExternC
-PfnDliHook   __pfnDliFailureHook2 = (PfnDliHook)DelayLoadNofify;
+PfnDliHook   __pfnDliFailureHook2 = (PfnDliHook)DelayLoadNotify;
 #endif // _WIN32
 #endif
-}
-}
-}
+
+}}}
 
 #endif // CPUONLY

@@ -106,20 +106,8 @@ public:
         }
     }
 
-    virtual bool OutputUsedInComputingInputNodesGradients() const override
-    {
-        // The GMMLogLikelihoodNode does not require its output value for computing
-        // the gradients of its input nodes
-        return false;
-    }
-
-    virtual bool InputUsedInComputingInputNodesGradients(size_t childIndex) const override
-    {
-        // The GMMLogLikelihoodNode does not require any of it's input's values for computing
-        // the gradients of its input nodes
-        UNREFERENCED_PARAMETER(childIndex);
-        return false;
-    }
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override { return false; }
 
     void BackpropToUnnormedPrior(Matrix<ElemType>& unnormedPriorGradientValues, const Matrix<ElemType>& gradientValues,
                                  const Matrix<ElemType>& prior, const Matrix<ElemType>& posterior, Matrix<ElemType>& temp)
@@ -453,8 +441,8 @@ public:
 #if 1         // no gradient flows to log LLs (but otherwise we leave it to user if, e.g., another node propagates a gradient into there)
             ; // gradient does not flow here
 #else
-            Input(inputIndex)->SetParameterUpdateRequired(false);
-            Input(inputIndex)->Gradient().SetValue(0.0);
+            Input(inputIndex)->SetLearningRateMultiplier(0);
+            Input(inputIndex)->Gradient().SetValue(0.0); // BUGBUG: Gradients must always be added, since nodes may have multiple parents.
 #endif
         }
         else
@@ -564,9 +552,9 @@ public:
         {
             auto node = dynamic_pointer_cast<SequenceWithSoftmaxNode<ElemType>>(nodeP);
 
-            *node->m_logSoftmaxOfRight = *m_logSoftmaxOfRight;
-            *node->m_softmaxOfRight = *m_softmaxOfRight;
-            *node->m_gammaFromLattice = *m_gammaFromLattice;
+            node->m_logSoftmaxOfRight->SetValue(*m_logSoftmaxOfRight);
+            node->m_softmaxOfRight->SetValue(*m_softmaxOfRight);
+            node->m_gammaFromLattice->SetValue(*m_gammaFromLattice);
             node->m_fsSmoothingWeight = m_fsSmoothingWeight;
             node->m_frameDropThreshold = m_frameDropThreshold;
             node->m_doReferenceAlignment = m_doReferenceAlignment;
@@ -701,8 +689,8 @@ public:
     virtual void /*ComputationNodeNonLooping::*/ ForwardPropNonLooping() override
     {
         Value().VerifySize(1, 1);
-        Input(0)->Value().VerifySize(1, 1);
-        Value().SetValue(Input(0)->Value());
+        assert(Input(0)->Value().GetNumRows() == 1);
+        Value().SetValue(Input(0)->Value().SumOfElements());
 #if NANCHECK
         Value().HasNan("DummyCriterionNode");
 #endif
@@ -715,15 +703,17 @@ public:
 
         if (Input(0)->OperationName() != L"InputValue")
             LogicError("DummyCriterionNode criterion requires the first input to be computed objectives.");
-        if (Input(0)->OperationName() != L"InputValue")
-            LogicError("DummyCriterionNode criterion requires the first input to be computed derivatives.");
+        if (Input(1)->OperationName() != L"InputValue")
+            LogicError("DummyCriterionNode criterion requires the second input to be computed derivatives.");
         if (isFinalValidationPass)
         {
-            if (Input(0)->GetSampleMatrixNumRows() != 1)
-                LogicError("DummyCriterionNode criterion requires the first input to have dimension 1.");
-            if (Input(0)->GetSampleMatrixNumRows() == 0 || Input(1)->GetSampleMatrixNumRows() == 0 || Input(2)->GetSampleMatrixNumRows() == 0)
+            if (Input(0)->GetSampleMatrixNumRows() == 0
+                || Input(1)->GetSampleMatrixNumRows() == 0
+                || Input(2)->GetSampleMatrixNumRows() == 0)
                 LogicError("DummyCriterionNode operation: one of the operands has 0 elements.");
-            if (Input(1)->GetSampleMatrixNumRows() != Input(2)->GetSampleMatrixNumRows())
+            if (Input(1)->GetSampleMatrixNumRows() != Input(2)->GetSampleMatrixNumRows()
+                || Input(0)->GetSampleMatrixNumCols() != Input(2)->GetSampleMatrixNumCols()
+                || Input(1)->GetSampleMatrixNumCols() != Input(2)->GetSampleMatrixNumCols())
                 LogicError("The Matrix dimension in the DummyCriterionNode operation does not match.");
         }
 

@@ -11,6 +11,7 @@
 #include "Sequences.h"
 #include "TensorShape.h"
 #include "MatrixPool.h"
+#include "ComputationEnvironment.h"
 
 #include <unordered_set>
 #include <map>
@@ -30,11 +31,13 @@
 // version number to control how to read and write
 #define CNTK_MODEL_VERSION_1 1
 #define CNTK_MODEL_VERSION_2 2
-#define CURRENT_CNTK_MODEL_VERSION CNTK_MODEL_VERSION_2
+#define CNTK_MODEL_VERSION_3 3
+#define CNTK_MODEL_VERSION_4 4 // PastValue
+#define CURRENT_CNTK_MODEL_VERSION CNTK_MODEL_VERSION_4
 
 extern bool g_shareNodeValueMatrices;
 
-#ifndef UNREFERENCED_PARAMETER
+#ifndef UNREFERENCED_PARAMETER // TODO: unify with UNUSED()
 #define UNREFERENCED_PARAMETER(P) (P)
 #endif
 
@@ -81,7 +84,7 @@ struct /*interface*/ IComputationNode
     virtual void BackpropTo(const size_t inputIndex, const FrameRange&) = 0; // backprop gradient into one of the inputs
     virtual void EndBackprop() = 0;                                          // called after last iteration step of ComputeGradient()
 
-    // --- these are meant to be overridden by ControlFlowNodes
+    // --- this is meant to be overridden by ControlFlowNodes
 
     virtual void Backprop(const FrameRange& fr, bool childrenInThisLoop, bool childrenInOuterLoop) = 0;
 
@@ -107,8 +110,8 @@ struct /*interface*/ IComputationNode
 
     // --- optional overrides for more informative logging
 
-    virtual void PrintSelfBeforeValidation() const = 0; // called in validation loop right before Validate()
-    virtual void DumpNodeInfo(const bool /*printValues*/, File& fstream) const = 0;
+    virtual std::string FormatOperationPrototype(const std::string& extraArgs) const = 0; // format the operation into a "prototype" (listing dimensions and parameters)
+    virtual void DumpNodeInfo(const bool /*printValues*/, const bool /*printMetadata*/, File& fstream) const = 0;
 
 protected:
     virtual ~IComputationNode()
@@ -159,7 +162,16 @@ struct ComputationNetworkOwnedNodeState
 
     virtual void MarkValueNonSharable() { m_valueSharable = false; }
     virtual void MarkValueSharable() { m_valueSharable = true; }
-    bool isValueSharable() const { return m_valueSharable; }
+    bool IsValueSharable() const { return m_valueSharable; }
+
+    // tracing flags
+    // Enable to print the value of the function-value matrix in somewhat readable format.
+    // These are public since you are meant to set these flags manually in the debugger or temporarily poke into them from code as needed.
+    bool m_traceNodeValue = false;
+    bool m_traceNodeValueAsCategoryLabel = false;
+    size_t m_traceNodeValueUpToDim = 3; // 3 should be enough to see simple patterns such as all values are identical or out of range
+    size_t m_traceNodeValueUpToT = 8;   // 8 time steps fit comfortably into a normal-sized console
+    void EnableNodeTracing(bool isCategoryLabel) { m_traceNodeValue = true; m_traceNodeValueAsCategoryLabel = isCategoryLabel; }
 
 protected:                // TODO: should be fully encapsulated here
 
@@ -226,11 +238,10 @@ public:
         m_evalTimeStamp = CreateUniqId();
     }
 
-    // the difference is taken to take into account numeric overflow (which really should never happen for a 64-bit integer... but hey, it's free!)
     bool IsOlderThan(const TimeStamp& other) const
     {
-        // BUGBUG: For some reason, we must test equality as well, although that does not indicate being older.
-        return GetEvalTimeStamp() - other.GetEvalTimeStamp() /*<*/ <= 0;
+        // the difference is taken to take into account numeric overflow (which really should never happen for a 64-bit integer... but hey, it's free!)
+        return GetEvalTimeStamp() - other.GetEvalTimeStamp() < 0;
     }
 
     int64_t CreateUniqId() const
@@ -265,8 +276,9 @@ public:
     // -----------------------------------------------------------------------
 
     ComputationNodeBase(DEVICEID_TYPE deviceId, const wstring& name)
-        : m_deviceId(deviceId), m_outputNeededDuringBackprop(true), m_parameterUpdateRequired(false), m_gradientInitialized(false), m_nodeName(name == L"" ? CreateUniqNodeName() : name)
+        : m_deviceId(deviceId), m_outputNeededDuringBackprop(true), m_learningRateMultiplier(0), m_gradientInitialized(false), m_nodeName(name == L"" ? CreateUniqNodeName() : name)
     {
+        // TODO: should m_learningRateMultiplier be set to 0? Or should every node have a way to add its own say on the learning rate for all its inputs?
     }
     virtual ~ComputationNodeBase()
     {
@@ -283,7 +295,7 @@ public:
         if (flags & CopyNodeFlags::copyNodeValue)
         {
             node->m_deviceId = m_deviceId;
-            node->m_parameterUpdateRequired = m_parameterUpdateRequired;
+            node->m_learningRateMultiplier = m_learningRateMultiplier;
             node->m_nodeName = newName;
 
             node->m_sampleLayout = m_sampleLayout;
@@ -367,7 +379,7 @@ public:
     //  - as a Matrix reference
     //     - actual object is a 2D tensor without MB Layout
     //     - ValueAsMatrix(), GradientAsMatrix() returns tensor as a 2D Matrix object
-    //     - nodes that do this are: TimesNode, DiagTimesNode, ConvolutionNode, NoiseContrastiveEstimationNode, ClassBasedCrossEntropyWithSoftmaxNode, TransposeNode, DiagonalNode
+    //     - nodes that do this are: TimesNode, DiagTimesNode, ConvolutionNode, NoiseContrastiveEstimationNode, ClassBasedCrossEntropyWithSoftmaxNode, TransposeDimensionsNode, DiagonalNode
     //
     // How values are stored:
     //
@@ -404,9 +416,9 @@ private:
     void CheckTensorIsMatrix() const
     {
         if (HasMBLayout())
-            LogicError("CheckTensorIsMatrix: Minibatch data cannot be interpreted as a single 2D tensor.");
+            LogicError("%ls %ls operation: Minibatch data cannot be interpreted as a single 2D tensor.", NodeName().c_str(), OperationName().c_str());
         else if (m_sampleLayout.GetRank() < 1 || m_sampleLayout.GetRank() > 2) // note: scalars are not stored as tensors of rank 0, but rather as 1-dim vectors. TODO: clean this up some day
-            LogicError("CheckTensorIsMatrix: Sample is not a column vector or matrix (1D or 2D tensor).");
+            LogicError("%ls %ls operation: Sample [%s] is not a column vector or matrix (1D or 2D tensor).", NodeName().c_str(), OperationName().c_str(), string(m_sampleLayout).c_str());
     }
 public:
     size_t GetAsMatrixNumRows() const
@@ -491,9 +503,10 @@ public:
 protected:
 
     size_t DetermineElementwiseTensorRank() const;                          // determine tensor rank when considering all inputs with padding
-    TensorShape GetTensorSliceFor(size_t rank, const FrameRange& fr) const; // form tensor shape of the slice referenced by FrameRange
 
 public:
+
+    TensorShape GetTensorSliceFor(size_t rank, const FrameRange& fr) const; // form tensor shape of the slice referenced by FrameRange. Public since nodes may call it for their inputs.
 
     // -----------------------------------------------------------------------
     // inputs
@@ -573,6 +586,7 @@ public:
 
     // helper to access to element(0,0) without having to type-cast
     virtual double Get00Element() const = 0;
+    virtual MatrixBasePtr ValuePtr() const = 0; // for use in readers that pass the agnostic object around
 
     // TODO: two sets of functions, choose one
     const std::wstring& NodeName() const { return m_nodeName; }
@@ -581,16 +595,30 @@ public:
     /*HasName::*/ void SetName(const std::wstring& newName) override // also for use by ExperimentalNetworkBuilder
     {
         m_nodeName = newName;
-        fprintf(stderr, "Node --> %ls = %ls\n", NodeName().c_str(), OperationName().c_str()), fflush(stderr);
+        //fprintf(stderr, "Node --> %ls : %ls\n", NodeName().c_str(), OperationName().c_str()), fflush(stderr);
     }
 
-    const bool&/*TODO: should be bool by value*/ NeedGradient() { return m_needsGradient; }
+    bool NeedsGradient() const { return m_needsGradient; }
 
-    void SetParameterUpdateRequired(bool f) { m_parameterUpdateRequired = f; }
-    bool IsParameterUpdateRequired() const { return m_parameterUpdateRequired; }
+    void SetLearningRateMultiplier(float f) 
+    { 
+        if (f < 0)
+            InvalidArgument("LearningRateMultiplier should be non-negative. You are tring to set it to %f.", f);
+        m_learningRateMultiplier = f; 
+    }
+    float GetLearningRateMultiplier() const { return m_learningRateMultiplier; }
+    bool IsParameterUpdateRequired() const { return m_learningRateMultiplier > 0; }
 
     // return true if the node's value should be computed before the normal training. e.g., mean and invStd of input features.
     virtual bool /*IComputationNode::*/ RequiresPreCompute() const { return false; }
+
+    const ComputationEnvironment& Environment() const
+    {
+        if (!m_environment)
+            LogicError("Environment: No environment has been set.");
+        return *m_environment;
+    }
+    void SetEnvironment(ComputationEnvironmentPtr environment) { m_environment = environment; }
 
     // -----------------------------------------------------------------------
     // validation
@@ -623,7 +651,7 @@ protected:
     void ValidateBinaryZip(bool isFinalValidationPass, bool allowBroadcast);
     void ValidateBinaryReduce(bool isFinalValidationPass);
     void InferMBLayoutFromInputsForStandardCase();
-    virtual void ValidateInferInputDimsFrom(const TensorShape&) = 0;    // (implemented by ComputationNode<ElemType>
+    virtual void ValidateInferInputDimsFrom(const TensorShape&) = 0;    // (implemented by ComputationNode<ElemType>)
 
 public:
 
@@ -634,7 +662,7 @@ public:
     virtual void /*IComputationNode::*/ BeginForwardProp() override // called before first iteration step of ForwardProp()
     {
 #ifdef TRACK_GAP_NANS
-        fprintf(stderr, "BeginForwardProp: %ls %ls operation\n", NodeName().c_str(), OperationName().c_str());
+        fprintf(stderr, "BeginForwardProp: %ls %ls operation [%s]\n", NodeName().c_str(), OperationName().c_str(), std::string(GetTensorShape(DetermineElementwiseTensorRank())).c_str());
 #endif
     }
     virtual void /*IComputationNode::*/ EndForwardProp() override // called after last iteration step of ForwardProp()
@@ -656,19 +684,15 @@ public:
 #endif
     }
 
-    // check whether a node is up-to-date w.r.t. its children, for lazy evaluation
-    // If this returns false, node must be evaluated to update m_value.
-    // BUGBUG: The function name is incorrect. It also returns 'true' if a child has the same time stamp (not older).
-    // This is virtual because it is overridden by traversal nodes.
-    virtual bool IsOutputOlderThanInputs() const
+    // check whether a node is out of date w.r.t. its children, for lazy evaluation
+    // If this returns true, node must be evaluated to update m_value.
+    // This is virtual because it is overridden by traversal nodes, which would check all their nodes' inputs.
+    virtual bool IsOutOfDateWrtInputs() const
     {
-        // TODO: use range-based for
-        for (size_t i = 0; i < GetNumInputs(); i++)
-        {
-            if (IsOlderThan(*m_inputs[i]))
+        for (const auto & input : GetInputs())
+            if (!input->IsOlderThan(*this))
                 return true;
-        }
-
+        // Note: This ^^ must also return true when time stamps are the same, for an unknown reason (possibly an initialization condition). We should track this down some day.
         return false;
     }
 
@@ -773,36 +797,7 @@ public:
     virtual void PrintSelf(bool printMatrices = false) const = 0;
 
     // called in validation loop right before Validate()
-    virtual void /*IComputationNode::*/ PrintSelfBeforeValidation() const
-    {
-        fprintf(stderr, "\nValidating --> %ls = %ls", NodeName().c_str(), OperationName().c_str());
-
-        if (!IsLeaf())
-        {
-            fprintf(stderr, "(");
-            for (size_t i = 0; i < GetNumInputs(); i++)
-            {
-                const auto& child = m_inputs[i];
-                if (i > 0)
-                    fprintf(stderr, ", ");
-
-                if (child == nullptr)
-                {
-                    fprintf(stderr, "NULL");
-                    continue;
-                }
-
-                const char* mbSizeMark = child->m_pMBLayout ? " x *" : "";
-                if (child->m_sampleLayout.GetRank() == 3 && (child->m_sampleLayout[1] != 1 || child->m_sampleLayout[0] != 1)) // looks like an image: use WHC notation
-                    fprintf(stderr, "%ls[%s%s {W=%lu, H=%lu, C=%lu}]", child->NodeName().c_str(), string(child->m_sampleLayout).c_str(), mbSizeMark,
-                            child->m_sampleLayout[1], child->m_sampleLayout[2], child->m_sampleLayout[0]);
-                // BUGBUG: This ^^ will print based on the old legacy layout, and we have no way of knowing here whether that is correct.
-                else
-                    fprintf(stderr, "%ls[%s%s]", child->NodeName().c_str(), string(child->m_sampleLayout).c_str(), mbSizeMark);
-            }
-            fprintf(stderr, ")");
-        }
-    }
+    virtual std::string /*IComputationNode::*/ FormatOperationPrototype(const std::string& extraArgs) const;
 
     // helper for topology plot: enumerate arcs that can be reached starting from the current node's children
     typedef std::pair<ComputationNodeBasePtr, ComputationNodeBasePtr> ComputationArc;
@@ -831,8 +826,12 @@ protected:
     TensorShape m_sampleLayout; // sample layout
     MBLayoutPtr m_pMBLayout;
 
+    // environment information
+    // This structure is shared with the ComputationNetwork that this node lives in
+    ComputationEnvironmentPtr m_environment;
+
     // flags related to gradient propagation
-    bool m_parameterUpdateRequired;    // update parameters? Only used for LearnableParameters.    --TODO: Should we make this a member of LearnableParameters actually? And require a type cast? Currently it is read out for all leaves.
+    float m_learningRateMultiplier;    // update parameters? Only used for LearnableParameters.    --TODO: Should we make this a member of LearnableParameters actually? And require a type cast? Currently it is read out for all leaves.
     bool m_gradientInitialized;        // indicates whether the gradient matrix has been resized and initialized to 0
     bool m_outputNeededDuringBackprop; // indicates whether the output value of the node is needed during backprop
 };
@@ -902,10 +901,10 @@ public:
         Base::CopyTo(nodeP, newName, flags);
         if (flags & CopyNodeFlags::copyNodeValue)
         {
-            auto node = UpCast(nodeP);
-            *node->m_value = *m_value;
+            auto node = DownCast(nodeP);
+            node->m_value->SetValue(*m_value);
             if (m_gradient)
-                *node->m_gradient = *m_gradient;
+                node->m_gradient->SetValue(*m_gradient);
             else
                 node->m_gradient = nullptr;
         }
@@ -923,17 +922,17 @@ public:
     // creation from configuration
     // Nodes with NumInputs<> should say DeclareConstructorFromConfigWithNumInputs(ClassName), and nodes without DeclareConstructorFromConfig(ClassName).
     // The macro will forward to the regular constructor of the node (which may do more than just calling the base constructor), and then attach the inputs from config.
-#define DeclareConstructorFromConfig(C)                  \
-    C(const ScriptableObjects::IConfigRecordPtr configp) \
-        : C(configp->Get(L"deviceId"), L"<placeholder>") \
-    {                                                    \
-        AttachInputs(configp);                           \
-    }
 #define DeclareConstructorFromConfigWithNumInputs(C)         \
     C(const ScriptableObjects::IConfigRecordPtr configp)     \
         : C(configp->Get(L"deviceId"), L"<placeholder>")     \
     {                                                        \
         AttachInputs(configp, this->GetExpectedNumInputs()); \
+    }
+#define DeclareConstructorFromConfig(C)                  \
+    C(const ScriptableObjects::IConfigRecordPtr configp) \
+        : C(configp->Get(L"deviceId"), L"<placeholder>") \
+    {                                                    \
+        AttachInputs(configp);                           \
     }
 
     // helper to load m_value from a stream
@@ -979,7 +978,7 @@ public:
         m_inputs.resize(inputs.size());
         for (size_t i = 0; i < m_inputs.size(); i++)
             if (inputs[i])
-                m_inputs[i] = UpCast(inputs[i]); // (UpCast() checks the type; the assignment then downcasts it again)
+                m_inputs[i] = DownCast(inputs[i]); // (DownCast() checks the type; the assignment then downcasts it again)
             else
                 m_inputs[i] = nullptr; // during network creation, nullpts are possible
     }
@@ -1012,7 +1011,7 @@ protected:
     }
 
     // up-cast to make life easier
-    static ComputationNodePtr UpCast(ComputationNodeBasePtr inode)
+    static ComputationNodePtr DownCast(ComputationNodeBasePtr inode)
     {
         ComputationNodePtr node = dynamic_pointer_cast<ComputationNode<ElemType>>(inode);
         if (!node)
@@ -1024,12 +1023,12 @@ protected:
     {
         if (inputIndex >= m_inputs.size())
             LogicError("Inputs: inputIndex %d is out of range for %ls %ls operation.", (int) inputIndex, NodeName().c_str(), OperationName().c_str());
-        return UpCast(m_inputs[inputIndex]);
+        return DownCast(m_inputs[inputIndex]);
     }
 
     void /*ComputationNodeBase::*/ SetInput(const size_t childIndex, const ComputationNodeBasePtr& inode) override
     {
-        const ComputationNodePtr node = UpCast(inode);
+        const ComputationNodePtr node = DownCast(inode);
 
         // require first nodes specified before the second to avoid null nodes condition.
         if (childIndex > m_inputs.size())
@@ -1072,6 +1071,12 @@ public:
         MaskMissingColumnsToZero(*m_gradient, m_pMBLayout, fr);
     }
 
+    // for index vectors: Invalid entries must be set to -1.
+    void MaskMissingValueColumnsTo(const FrameRange& fr, ElemType val)
+    {
+        MaskMissingColumnsTo(*m_value, m_pMBLayout, fr, val);
+    }
+
     // for debugging, set the gaps to NaN instead (to track whether it bubbles up somewhere)
     void InvalidateMissingValueColumns(const FrameRange& fr) override final
     {
@@ -1091,10 +1096,37 @@ public:
     const Matrix<ElemType>& Value() const { return *m_value; }
     Matrix<ElemType>&       Value()       { return *m_value; }
 
+    MatrixBasePtr ValuePtr() const override final { return m_value; }    // readers want this as a shared_ptr straight
+    // Note: We cannot return a const& since returning m_value as a MatrixBasePtr is a type cast that generates a temporary. Interesting.
+
     const Matrix<ElemType>& Gradient() const { return *m_gradient; }
     Matrix<ElemType>&       Gradient()       { return *m_gradient; }
 
 private:
+
+    template<class E>
+    void RethrowAs(const std::exception & e, const std::string & what)
+    {
+        const auto * pe = dynamic_cast<const ExceptionWithCallStack<E> *>(&e);
+        if (pe)
+            throw ExceptionWithCallStack<E>(what, pe->CallStack());
+        else if (dynamic_cast<const E *>(&e))
+            throw E(what);
+    }
+
+    // rethrow an exception with added node-name information
+    // Use this for exceptions we may get e.g. from the Matrix library, such as VerifySize().
+    __declspec_noreturn
+    void Rethrow(const std::exception & e)
+    {
+        string what = msra::strfun::strprintf("%s, for %ls %ls operation.", e.what(), NodeName().c_str(), OperationName().c_str());
+        RethrowAs<std::runtime_error>   (e, what);
+        RethrowAs<std::logic_error>     (e, what);
+        RethrowAs<std::invalid_argument>(e, what);
+        //RethrowAs<std::bad_alloc>       (e, what); // can't throw with message
+        //RethrowAs<std::exception>       (e, what); // ditto
+        throw e;
+    }
 
     // map a tensor to a matrix
     // The leading dimension maps to rows, the rest to columns, for compat with sparse matrix lib.
@@ -1103,7 +1135,14 @@ private:
         size_t numRows = GetAsMatrixNumRows();
         size_t numCols = GetAsMatrixNumCols();
         // We only get here if the tensor indeed describes an 1D or 2D object. In that case, just verify the dimensions.
+        try
+        {
         data.VerifySize(numRows, numCols);
+        }
+        catch (const std::exception& e)
+        {
+            Rethrow(e);
+        }
         return data;
     }
 
@@ -1120,9 +1159,9 @@ public:
         {
             return DataWithMBLayoutFor(data, fr, m_pMBLayout);
         }
-        catch (const logic_error& e) // catch the error and rethrow it with the node name attached
+        catch (const std::exception& e) // catch the error and rethrow it with the node name attached
         {
-            LogicError("%s, for %ls %ls operation.", e.what(), NodeName().c_str(), OperationName().c_str());
+            Rethrow(e);
         }
     }
 
@@ -1152,9 +1191,9 @@ public:
         {
             return TensorView<ElemType>(data, GetTensorSliceFor(rank, fr));
         }
-        catch (const logic_error& e) // catch the error and rethrow it with the node name attached
+        catch (const std::exception& e) // catch the error and rethrow it with the node name attached
         {
-            LogicError("%s, for %ls %ls operation.", e.what(), NodeName().c_str(), OperationName().c_str());
+            Rethrow(e);
         }
     }
     TensorView<ElemType> ValueTensorFor(size_t rank, const FrameRange& fr)
@@ -1191,8 +1230,11 @@ private:
         else
         {
             const auto& shape = GetSampleLayout();
-            rows = shape.GetRank() > 0 ? shape[0] : 0;
-            cols = rows > 0 ? shape.GetNumElements() / rows : 0;
+            size_t rank = shape.GetRank();
+            rows = rank > 0 ? shape[0] : 0;
+            cols = rank > 0 ?        1 : 0;
+            for (size_t k = 1; k < rank; k++)   // all dimensions except leading one
+                cols *= shape[k];
         }
     }
 
@@ -1210,7 +1252,14 @@ protected:
     {
         size_t rows, cols;
         DetermineDataSize(rows, cols);
+        try
+        {
         m.VerifySize(rows, cols);
+    }
+        catch (const std::exception& e)
+        {
+            Rethrow(e);
+        }
     }
 
 public:
@@ -1243,11 +1292,11 @@ public:
         VerifyDataSize(Value());
     }
 
-#ifdef _DEBUG
     // NaN checks
     virtual void /*IComputationNode::*/ EndForwardProp() override
     {
         Base::EndForwardProp();
+#ifdef _DEBUG
 #ifdef TRACK_GAP_NANS
         MaskMissingValueColumnsToZero(FrameRange(m_pMBLayout)); // HasNaN() operates on a whole matrix, so first flatten all gaps to 0
         if (Value().HasNan("EndForwardProp"))
@@ -1258,8 +1307,10 @@ public:
         Value().Print(msra::strfun::utf8(NodeName()), 0, min(Value().GetNumRows()-1, 4), 0, min(Value().GetNumCols()-1, 4));
 #endif
         InvalidateMissingValueColumns(FrameRange(m_pMBLayout)); // blast NaNs into columns that are gaps in a packed layout
-    }
 #endif
+        // tracing
+        Trace();
+    }
 
 #if 0   // (keep it around in case we need to add stuff in the future)
         virtual void /*IComputationNode::*/BeginBackprop() override
@@ -1289,47 +1340,7 @@ public:
 
     // this is the entry point from Network; while it will call virtual BackpropTo() into the actual node implementation
     // TODO: move to -Base (or -Network?)
-    void Backprop(const FrameRange& fr, bool childrenInThisLoop, bool childrenInOuterLoop) override
-    {
-        if (fr.IsAllFrames() && IsPartOfLoop() && childrenInThisLoop)
-            LogicError("%ls %ls operation: Backprop called with whole-batch FrameRange on node that participates in a loop", NodeName().c_str(), OperationName().c_str());
-
-        for (size_t i = 0; i < m_inputs.size(); i++)
-        {
-            ComputationNodePtr child = Input(i);
-            if (child->m_needsGradient &&
-                (childrenInThisLoop && child->IsPartOfLoop() == IsPartOfLoop() ||
-                 childrenInOuterLoop && child->IsPartOfLoop() != IsPartOfLoop()))
-            {
-                // fprintf(stderr, "Backprop: %ls %ls operation -> child %d %ls %ls\n", NodeName().c_str(), OperationName().c_str(), (int)i, child->NodeName().c_str(), child->OperationName().c_str());
-                if (!m_needsGradient)
-                    LogicError("%ls %ls operation has m_needsGradient set to false but children require it.", NodeName().c_str(), OperationName().c_str());
-#ifdef DISPLAY_DEBUG
-                fprintf(stderr, "    [%lu]: %ls(%ls)\n", i, child->OperationName().c_str(), child->NodeName().c_str());
-#endif
-#if DUMPOUTPUT
-                fprintf(stderr, "Backprop%d_%ls\n", i, NodeName().c_str());
-#endif
-                child->LazyZeroGradient(); // set gradient to 0 if this is the first time
-
-                // If we propagate from a loop to a node that is outside the loop, we are not efficient.
-                // This case is handled by SEQTraversalFlowControlNode::Backprop().
-                // The check below is to verify that.
-                if (IsPartOfLoop() && !child->IsPartOfLoop() && !fr.IsAllFrames())
-                {
-                    LogicError("Backprop: Inefficiency: %ls %ls operation in loop propagates gradient to non-loop %ls %ls\n",
-                               NodeName().c_str(), OperationName().c_str(), child->NodeName().c_str(), child->OperationName().c_str());
-                }
-
-                // fprintf(stderr, "BackpropTo %d %d %ls %ls\n", (int)fr.timeIdxInSeq, (int)i, NodeName().c_str(), OperationName().c_str());
-                BackpropTo(i, fr); // this computes partial wrt to the child and sums the gradient value in the child
-            }
-#ifdef DISPLAY_DEBUG
-            else
-                fprintf(stderr, "    [%lu]: %s(%s) (no gradient needed so don't compute for)\n", i, child->OperationName().c_str(), child->NodeName().c_str());
-#endif
-        }
-    }
+    void Backprop(const FrameRange& fr, bool childrenInThisLoop, bool childrenInOuterLoop) override;
 
     // TODO: why of the inputs, and not the node itself?
     void /*ComputationNodeBase::*/ ZeroGradientsOfInputs() override // clears the lazy-init flags (LazyZeroGradient() actually clears the values lazily)
@@ -1360,14 +1371,17 @@ public:
     // request matrices needed to do node function value evaluation
     virtual void RequestMatricesBeforeForwardProp(MatrixPool& matrixPool) override
     {
+        if (IsValueSharable())
         RequestMatrixFromPool(m_value, matrixPool);
+        else
+            CreateMatrixIfNull(m_value);
     }
 
     // release temp matrices that are only used by forward computation
     // don't release matrices that need to be used in the gradient computation
     virtual void ReleaseMatricesAfterForwardProp(MatrixPool& matrixPool) override
     {
-        if (!IsOutputNeededDuringBackprop() && (m_value->GetMatrixType() != SPARSE) && isValueSharable())
+        if (!IsOutputNeededDuringBackprop() && (m_value->GetMatrixType() != SPARSE) && IsValueSharable())
             ReleaseMatrixToPool(m_value, matrixPool);
     }
 
@@ -1375,7 +1389,7 @@ public:
     {
         for (int i = 0; i < m_inputs.size(); i++)
         {
-            if (m_inputs[i]->NeedGradient())
+            if (m_inputs[i]->NeedsGradient())
                 m_inputs[i]->RequestMatricesBeforeBackprop(matrixPool);
         }
     }
@@ -1396,7 +1410,7 @@ public:
 
             // Release the Value matrix only if the output value is needed during backprop
             // since in the case it isn't used, we release it during forward prop itself
-            if (IsOutputNeededDuringBackprop() && m_value->GetMatrixType() != SPARSE && isValueSharable())
+            if (IsOutputNeededDuringBackprop() && m_value->GetMatrixType() != SPARSE && IsValueSharable())
                 ReleaseMatrixToPool(m_value, matrixPool);
         }
     }
@@ -1443,16 +1457,34 @@ public:
     // miscellaneous
     // -----------------------------------------------------------------------
 
-    virtual void DumpNodeInfo(const bool /*printValues*/, File& fstream) const;
+    virtual void DumpNodeInfo(const bool /*printValues*/, const bool /*printMetadata*/, File& fstream) const;
+    // helper for SimpleOutWriter, living in here to be able to use in debugging
+    void WriteMinibatchWithFormatting(FILE* f, size_t onlyUpToRow, size_t onlyUpToT, bool transpose, bool isCategoryLabel, const std::vector<std::string>& labelMapping,
+                                      const std::string& sequenceSeparator, const std::string& sequencePrologue, const std::string& sequenceEpilogue, const std::string& elementSeparator, const std::string& sampleSeparator,
+                                      const std::string& valueFormatString) const;
+    void Trace()
+    {
+        if (m_traceNodeValue)
+        {
+            fprintf(stderr, "Trace --> %s\n", FormatOperationPrototype("").c_str());
+            WriteMinibatchWithFormatting(stderr, m_traceNodeValueUpToDim, m_traceNodeValueUpToT, false/*transpose*/, m_traceNodeValueAsCategoryLabel, std::vector<std::string>(),
+                                         ""/*sequenceSeparator*/, "  "/*sequencePrologue*/, "\n"/*sequenceEpilogue*/, " "/*elementSeparator*/, "\n  "/*sampleSeparator*/,
+                                         "%13.10f"/*valueFormatString*/);
+        }
+    }
 
 protected:
 
     // print node values
-    void PrintNodeValuesToFile(const bool printValues, File& fstream) const
+    // This is used for dumping model parameters, not minibatch data.
+    void PrintNodeValuesToFile(const bool printValues, const bool printMetadata, File& fstream) const
     {
         if (printValues)
-        {
-            fstream << wstring(L"\n");
+        { 
+            if (printMetadata)
+            {
+                fstream << wstring(L"\n");
+            }
             const Matrix<ElemType>& m = Value();
             for (size_t i = 0; i < m.GetNumRows(); i++)
             {
@@ -1462,7 +1494,10 @@ protected:
                 }
                 fstream << wstring(L"\n");
             }
-            fstream << wstring(L"####################################################################");
+            if (printMetadata)
+            {
+                fstream << wstring(L"####################################################################");
+            }
         }
     }
 
@@ -1622,6 +1657,7 @@ public:
     virtual void CopyTo(ComputationNodeBasePtr node, const std::wstring& newName, const CopyNodeFlags flags) const override { NOT_IMPLEMENTED; }
     virtual ComputationNodeBasePtr Duplicate(const std::wstring& newName, const CopyNodeFlags flags) override { NOT_IMPLEMENTED; }
     virtual double Get00Element() const override { NOT_IMPLEMENTED; }
+    virtual MatrixBasePtr ValuePtr() const override { NOT_IMPLEMENTED; }
     virtual void UpdateFunctionMBSize() override { NOT_IMPLEMENTED; }
     virtual void AttachInputs(const std::vector<ComputationNodeBasePtr>& inputs) override { NOT_IMPLEMENTED; }
     virtual void PrintSelf(bool) const override { NOT_IMPLEMENTED; }
@@ -1636,8 +1672,8 @@ public:
     virtual std::wstring ToString(void) const override { NOT_IMPLEMENTED; }
     // these are meant to be called during computation, so provide dummy implementations
     virtual bool RequiresPreCompute() const override { return false; } // return true if the node's value should be computed before the normal training. e.g., mean and invStd of input features.
-    virtual void PrintSelfBeforeValidation() const override { }
-    virtual void DumpNodeInfo(const bool /*printValues*/, File& fstream) const override { }
+    virtual std::string FormatOperationPrototype(const std::string& extraArgs) const override { return ""; }
+    virtual void DumpNodeInfo(const bool /*printValues*/, const bool /*printMetadata*/, File& fstream) const override {}
 
 protected: public:                                     // needed in ComputationNetwork::FindInRecurrentLoops(), which really should be part of SEQTraversalFlowControlNode
     std::vector<ComputationNodeBasePtr> m_nestedNodes; // nodes tucked away in this node, in evaluation order
@@ -1677,10 +1713,24 @@ public:
 };
 
 // =======================================================================
-// IRecurrentNode -- helper wrapper class for ComputationNodes that can be recurrent
+// IRecurrentNode -- interface implemented by ComputationNodes that can be recurrent
 // =======================================================================
 
 struct IRecurrentNode { virtual int GetRecurrenceSteppingDirection() const = 0; };
+
+// =======================================================================
+// PreComputedNodeBase -- interface implemented by ComputationNodes that precompute
+// TODO: We can use this interface in more places.
+// =======================================================================
+
+struct IPreComputeNode
+{
+    // check whether node has already undergone precomputation
+    virtual bool HasComputed() const = 0;
+    // call this with 'false' at start and with 'true' at end
+    // This is used for resetting and updating from accumulators.
+    virtual void MarkComputed(const bool hasComputed) = 0;
+};
 
 // =======================================================================
 // helper macro to ease access to base members in presence of C++ two-phase name lookup
@@ -1710,6 +1760,7 @@ protected:                                                                      
     using Base::DetermineElementwiseTensorRank;                                                                                                          \
     using Base::DumpNodeInfo;                                                                                                                            \
     using Base::EnumerateNodes;                                                                                                                          \
+    using Base::Environment;                                                                                                                             \
     using Base::ForwardProp;                                                                                                                             \
     using Base::GetAsMatrixNumCols;                                                                                                                      \
     using Base::GetAsMatrixNumRows;                                                                                                                      \
@@ -1736,7 +1787,8 @@ protected:                                                                      
     using Base::InvalidateMissingGradientColumns;                                                                                                        \
     using Base::InvalidateMissingValueColumns;                                                                                                           \
     using Base::IsLeaf;                                                                                                                                  \
-    using Base::IsOutputOlderThanInputs;                                                                                                                 \
+    using Base::IsOutOfDateWrtInputs;                                                                                                                    \
+    using Base::IsPartOfLoop;                                                                                                                            \
     using Base::LinkToMBLayout;                                                                                                                          \
     using Base::Load;                                                                                                                                    \
     using Base::LoadValue;                                                                                                                               \
@@ -1745,9 +1797,10 @@ protected:                                                                      
     using Base::MaskMissingValueColumnsToZero;                                                                                                           \
     using Base::MaskedGradientFor;                                                                                                                       \
     using Base::MaskedValueFor;                                                                                                                          \
+    using Base::MarkValueNonSharable;                                                                                                                    \
     using Base::OutputUsedInComputingInputNodesGradients;                                                                                                \
     using Base::PrintNodeValuesToFile;                                                                                                                   \
-    using Base::PrintSelfBeforeValidation;                                                                                                               \
+    using Base::FormatOperationPrototype;                                                                                                               \
     using Base::ReleaseMatricesAfterBackprop;                                                                                                            \
     using Base::ReleaseMatricesAfterForwardProp;                                                                                                         \
     using Base::ReleaseMatrixToPool;                                                                                                                     \
@@ -1758,7 +1811,7 @@ protected:                                                                      
     using Base::SetDims1;                                                                                                                                \
     using Base::SetDims;                                                                                                                                 \
     using Base::SetInput;                                                                                                                                \
-    using Base::SetParameterUpdateRequired;                                                                                                              \
+    using Base::SetLearningRateMultiplier;                                                                                                               \
     using Base::UpdateFunctionMBSize;                                                                                                                    \
     using Base::UpdateFunctionValuesSize;                                                                                                                \
     using Base::Validate;                                                                                                                                \
@@ -1778,7 +1831,7 @@ protected:                                                                      
     using Base::m_inputs;                                                                                                                                \
     using Base::m_nodeName;                                                                                                                              \
     using Base::m_pMBLayout;                                                                                                                             \
-    using Base::m_parameterUpdateRequired;                                                                                                               \
+    using Base::m_learningRateMultiplier;                                                                                                                \
     using Base::m_sampleLayout;                                                                                                                          \
     using Base::m_value;                                                                                                                                 \
     using Base::m_valueSharable;                                                                                                                         \
@@ -1884,4 +1937,5 @@ public:
 #define UsingBinaryElementwiseNodeBaseMembers UsingComputationNodeMembersBoilerplate;
 
 #pragma endregion base computation class
-} } }
+
+}}}

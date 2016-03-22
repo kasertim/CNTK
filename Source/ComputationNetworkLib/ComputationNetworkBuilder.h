@@ -60,7 +60,8 @@ public:
     // The following functions create nodes and link them to the network and their inputs.
     // TODO: Do we need both this set and the one above that does not add inputs? Can they share more code?
     ComputationNodePtr BatchNormalization(const ComputationNodePtr input, const ComputationNodePtr scale, const ComputationNodePtr bias,
-                                          const ComputationNodePtr runMean, const ComputationNodePtr runInvStdDev, bool eval = false, bool spatial = false, double expAvgFactor = 1, ImageLayoutKind imageLayoutKind = ImageLayoutKind::CHW, const std::wstring nodeName = L"");
+                                          const ComputationNodePtr runMean, const ComputationNodePtr runInvStdDev, bool eval = false, bool spatial = false, double normalizationTimeConstant = 0, double epsilon = 1e-5, bool useCntkEngine = true,
+                                          ImageLayoutKind imageLayoutKind = ImageLayoutKind::CHW, const std::wstring nodeName = L"");
     ComputationNodePtr Convolution(const ComputationNodePtr weight,
                                    const ComputationNodePtr inputValues,
                                    const size_t kernelWidth, const size_t kernelHeight, const size_t outputChannels,
@@ -76,6 +77,7 @@ public:
 #ifdef COMING_SOON
     ComputationNodePtr CRF(const ComputationNodePtr label, const ComputationNodePtr postDepScore, const ComputationNodePtr transition_score, const std::wstring nodeName = L"");
 #endif
+    ComputationNodePtr Abs(const ComputationNodePtr a, const std::wstring nodeName = L"");
     ComputationNodePtr ClassCrossEntropyWithSoftmax(const ComputationNodePtr label, const ComputationNodePtr prediction, const ComputationNodePtr input_weight, const ComputationNodePtr cls_log_post_prob, const std::wstring nodeName = L"");
     ComputationNodePtr Cos(const ComputationNodePtr a, const std::wstring nodeName = L"");
     ComputationNodePtr CosDistance(const ComputationNodePtr a, const ComputationNodePtr b, const std::wstring nodeName = L"");
@@ -110,6 +112,7 @@ public:
     ComputationNodePtr PerDimMeanVarDeNormalization(const ComputationNodePtr feature, const ComputationNodePtr mean, const ComputationNodePtr InvStdDev, const std::wstring nodeName = L"");
     ComputationNodePtr PerDimMeanVarNormalization(const ComputationNodePtr feature, const ComputationNodePtr mean, const ComputationNodePtr InvStdDev, const std::wstring nodeName = L"");
     ComputationNodePtr Plus(const ComputationNodePtr a, const ComputationNodePtr b, const std::wstring nodeName = L"");
+    ComputationNodePtr Reciprocal(const ComputationNodePtr a, const std::wstring nodeName = L"");
     ComputationNodePtr RectifiedLinear(const ComputationNodePtr a, const std::wstring nodeName = L"");
     ComputationNodePtr Reshape(const ComputationNodePtr a, const TensorShape& imageLayout, const std::wstring nodeName = L"");
     ComputationNodePtr RowRepeat(const ComputationNodePtr a, const size_t num_repeat, const std::wstring nodeName = L"");
@@ -121,13 +124,12 @@ public:
     ComputationNodePtr SequenceWithSoftmax(const ComputationNodePtr label, const ComputationNodePtr prediction, const ComputationNodePtr loglikelihood, const std::wstring nodeName = L"");
     ComputationNodePtr Sigmoid(const ComputationNodePtr a, const std::wstring nodeName = L"");
     ComputationNodePtr Softmax(const ComputationNodePtr a, const std::wstring nodeName = L"");
+    ComputationNodePtr Sqrt(const ComputationNodePtr a, const std::wstring nodeName = L"");
     ComputationNodePtr SquareError(const ComputationNodePtr a, const ComputationNodePtr b, const std::wstring nodeName = L"");
     ComputationNodePtr Sum(const ComputationNodePtr a, const std::wstring nodeName = L"");
     ComputationNodePtr Tanh(const ComputationNodePtr a, const std::wstring nodeName = L"");
-    ComputationNodePtr Times(const ComputationNodePtr a, const ComputationNodePtr b, const std::wstring nodeName = L"");
-#ifdef COMING_SOON
-    ComputationNodePtr Transpose(const ComputationNodePtr matrix, const std::wstring nodeName = L"");
-#endif
+    ComputationNodePtr Times(const ComputationNodePtr a, const ComputationNodePtr b, size_t outputRank = 1, const std::wstring nodeName = L"");
+    ComputationNodePtr TransposeDimensions(const ComputationNodePtr matrix, int dim1, int dim2, const std::wstring nodeName = L"");
     ComputationNodePtr TransposeTimes(const ComputationNodePtr a, const ComputationNodePtr b, const std::wstring nodeName = L"");
 #if 1 // legacy
     ComputationNodePtr LegacyReshape(const ComputationNodePtr a, const size_t num_rows, const TensorShape& imageLayout, const std::wstring nodeName = L"");

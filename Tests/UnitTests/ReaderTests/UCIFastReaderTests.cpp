@@ -21,7 +21,7 @@ BOOST_FIXTURE_TEST_SUITE(ReaderTestSuite, UCIReaderFixture)
 BOOST_AUTO_TEST_CASE(UCIFastReaderSimpleDataLoop)
 {
     HelperRunReaderTest<float>(
-        testDataPath() + "/Config/UCIFastReaderSimpleDataLoop_Config.txt",
+        testDataPath() + "/Config/UCIFastReaderSimpleDataLoop_Config.cntk",
         testDataPath() + "/Control/UCIFastReaderSimpleDataLoop_Control.txt",
         testDataPath() + "/Control/UCIFastReaderSimpleDataLoop_Output.txt",
         "Simple_Test",
@@ -33,8 +33,8 @@ BOOST_AUTO_TEST_CASE(UCIFastReaderSimpleDataLoop)
         1,
         0,
         1);
+};
 
-    BOOST_AUTO_TEST_SUITE_END()
-}
-}
-} } }
+BOOST_AUTO_TEST_SUITE_END()
+
+} } } }

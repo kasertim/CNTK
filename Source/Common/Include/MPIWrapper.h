@@ -10,6 +10,7 @@
 #include <string>
 #include <array>
 #include <vector>
+#include <memory>
 
 namespace Microsoft { namespace MSR { namespace CNTK {
 
@@ -49,7 +50,7 @@ static int operator||(int rc, const MpiFail &what)
     RuntimeError("%s", what.c_str());
 }
 
-class MPIWrapper
+class MPIWrapper : public std::enable_shared_from_this<MPIWrapper>
 {
     int m_myRank;
     int m_numMPINodes;
@@ -58,6 +59,8 @@ class MPIWrapper
     // MPI communicator that reflects the current subset selection
     MPI_Comm m_currentComm;
 
+    static std::shared_ptr<MPIWrapper> s_mpi;
+
     // MPI_Init() with delay-loading the msmpi.dll (possibly causing a failure if missing; we want to catch that)
     int MPI_Init_DL()
     {
@@ -65,6 +68,12 @@ class MPIWrapper
         __try
 #endif
         {
+            // don't initialize if that has been done already
+            int flag = 0;
+            MPI_Initialized(&flag);
+            if (flag)
+                return MPI_SUCCESS;
+
             int argc = 0;
             char **argv = NULL;
             int requiredThreadLevelSupport = MPI_THREAD_SERIALIZED;
@@ -94,7 +103,6 @@ class MPIWrapper
     static int s_myRank;
     static void MPIWorkaroundAtExit()
     {
-        // Note: we can't use g_mpi, since MPI stack is already down at this point
         Sleep(s_myRank * 50);
     }
 
@@ -112,12 +120,7 @@ public:
         fprintf(stderr, "MPIWrapper: initializing MPI\n");
         fflush(stderr);
 
-        int flag = 0;
-        MPI_Initialized(&flag);
-        if (!flag)
-        {
-            MPI_Init_DL() || MpiFail("mpiaggregator: MPI_Init");
-        }
+        MPI_Init_DL() || MpiFail("mpiaggregator: MPI_Init");
         MPI_Comm_rank(MPI_COMM_WORLD, &m_myRank);
         MPI_Comm_size(MPI_COMM_WORLD, &m_numMPINodes);
         m_numNodesInUse = m_numMPINodes;
@@ -150,9 +153,11 @@ public:
     {
         fprintf(stderr, "~MPIWrapper\n");
         fflush(stderr);
+        // TODO: Check for error code and throw if !std::uncaught_exception()
         MPI_Finalize();
     }
 
+private:
     void Ping(const char *msg) const
     {
 #undef USE2NDCOMM
@@ -214,6 +219,28 @@ public:
                 (int) CurrentNodeRank(), IsIdle() ? "out (idle)" : "in (participating)");
         fflush(stderr);
         Ping("requestnodes (after change)");
+    }
+
+public:
+
+    static std::shared_ptr<MPIWrapper> GetInstance(bool create = false)
+    {
+        static bool initialized = false;
+        if (create)
+        {
+            if (initialized)
+                LogicError("Creating MPIWrapper instance after a GetInstance call has been already made!");
+            else
+                s_mpi = std::make_shared<MPIWrapper>();
+        }
+
+        initialized = true;
+        return s_mpi;
+    }
+
+    static void DeleteInstance()
+    {
+        s_mpi = nullptr;
     }
 
     MPI_Comm Communicator() const
@@ -310,8 +337,5 @@ public:
         MPI_Barrier(m_currentComm) || MpiFail("waitall: MPI_Barrier");
     }
 };
-}
-}
-}
 
-extern Microsoft::MSR::CNTK::MPIWrapper *g_mpi;
+}}}

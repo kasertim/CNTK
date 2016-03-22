@@ -109,7 +109,7 @@ void HTKMLFReader<ElemType>::InitFromConfig(const ConfigRecordType& readerConfig
 
     // Checks if partial minibatches are allowed.
     std::string minibatchMode(readerConfig(L"minibatchMode", "Partial"));
-    m_partialMinibatch = !_stricmp(minibatchMode.c_str(), "Partial");
+    m_partialMinibatch = EqualCI(minibatchMode, "Partial");
 
     // Figures out if we have to do minibatch buffering and how.
     if (m_doSeqTrain)
@@ -195,12 +195,12 @@ void HTKMLFReader<ElemType>::PrepareForSequenceTraining(const ConfigRecordType& 
         if (temp.ExistsCurrent(L"type"))
         {
             wstring type = temp(L"type");
-            if (!_wcsicmp(type.c_str(), L"readerDeriv") || !_wcsicmp(type.c_str(), L"seqTrainDeriv") /*for back compatibility */)
+            if (EqualCI(type, L"readerDeriv") || EqualCI(type, L"seqTrainDeriv") /*for back compatibility */)
             {
                 m_nameToTypeMap[id] = InputOutputTypes::readerDeriv;
                 hasDrive = true;
             }
-            else if (!_wcsicmp(type.c_str(), L"readerObj") || !_wcsicmp(type.c_str(), L"seqTrainObj") /*for back compatibility */)
+            else if (EqualCI(type, L"readerObj") || EqualCI(type, L"seqTrainObj") /*for back compatibility */)
             {
                 m_nameToTypeMap[id] = InputOutputTypes::readerObj;
                 hasObj = true;
@@ -305,7 +305,7 @@ void HTKMLFReader<ElemType>::PrepareForTrainingOrTesting(const ConfigRecordType&
 
         // Figures out the category.
         wstring type = thisFeature(L"type", L"real");
-        if (!_wcsicmp(type.c_str(), L"real"))
+        if (EqualCI(type, L"real"))
         {
             m_nameToTypeMap[featureNames[i]] = InputOutputTypes::real;
         }
@@ -348,7 +348,7 @@ void HTKMLFReader<ElemType>::PrepareForTrainingOrTesting(const ConfigRecordType&
             type = (const wstring&) thisLabel(L"labelType"); // let's deprecate this eventually and just use "type"...
         else
             type = (const wstring&) thisLabel(L"type", L"category"); // outputs should default to category
-        if (!_wcsicmp(type.c_str(), L"category"))
+        if (EqualCI(type, L"category"))
             m_nameToTypeMap[labelNames[i]] = InputOutputTypes::category;
         else
             InvalidArgument("label type must be Category");
@@ -402,11 +402,11 @@ void HTKMLFReader<ElemType>::PrepareForTrainingOrTesting(const ConfigRecordType&
     if (readerConfig.Exists(L"randomize"))
     {
         const std::string& randomizeString = readerConfig(L"randomize");
-        if (!_stricmp(randomizeString.c_str(), "none"))
+        if (EqualCI(randomizeString, "none"))
         {
             randomize = randomizeNone;
         }
-        else if (!_stricmp(randomizeString.c_str(), "auto"))
+        else if (EqualCI(randomizeString, "auto"))
         {
             randomize = randomizeAuto;
         }
@@ -464,19 +464,23 @@ void HTKMLFReader<ElemType>::PrepareForTrainingOrTesting(const ConfigRecordType&
     // option is "rollingWindow". We only support "blockRandomize" in
     // sequence training.
     std::string readMethod(readerConfig(L"readMethod", "blockRandomize"));
-    if (!_stricmp(readMethod.c_str(), "blockRandomize"))
+    if (EqualCI(readMethod, "blockRandomize"))
     {
         // construct all the parameters we don't need, but need to be passed to the constructor...
         std::pair<std::vector<wstring>, std::vector<wstring>> latticetocs;
         std::unordered_map<std::string, size_t> modelsymmap;
-        m_lattices = new msra::dbn::latticesource(latticetocs, modelsymmap);
-
+        
+        // Note, we are actually not using <m_lattices>, the only reason we
+        // kept it was because it was required by
+        // <minibatchutterancesourcemulti>.
+        m_lattices = new msra::dbn::latticesource(latticetocs, modelsymmap, L"");
+        
         // now get the frame source. This has better randomization and doesn't create temp files
         m_frameSource = new msra::dbn::minibatchutterancesourcemulti(
             scriptpaths, infilesmulti, labelsmulti, m_featDims, m_labelDims,
             numContextLeft, numContextRight, randomize, *m_lattices, m_latticeMap, m_framemode);
     }
-    else if (!_stricmp(readMethod.c_str(), "rollingWindow"))
+    else if (EqualCI(readMethod, "rollingWindow"))
     {
         // "rollingWindow" is not supported in sequence training.
         if (m_doSeqTrain)
@@ -669,87 +673,29 @@ void HTKMLFReader<ElemType>::PrepareForWriting(const ConfigRecordType& readerCon
 template <class ElemType>
 HTKMLFReader<ElemType>::~HTKMLFReader()
 {
-    if (m_mbiter != NULL)
-    {
-        delete m_mbiter;
-        m_mbiter = NULL;
-    }
-    if (m_frameSource != NULL)
-    {
-        delete m_frameSource;
-        m_frameSource = NULL;
-    }
-    if (m_lattices != NULL)
-    {
-        delete m_lattices;
-        m_lattices = NULL;
-    }
-    if (m_seqTrainDeriv != NULL)
-    {
-        delete m_seqTrainDeriv;
-        m_seqTrainDeriv = NULL;
-    }
-    if (m_uttDerivBuffer != NULL)
-    {
-        delete m_uttDerivBuffer;
-        m_uttDerivBuffer = NULL;
-    }
+    delete m_mbiter;
+    delete m_frameSource;
+    delete m_lattices;
+    delete m_seqTrainDeriv;
+    delete m_uttDerivBuffer;
 
-    if (!m_featuresBufferMultiIO.empty())
-    {
-        foreach_index (i, m_featuresBufferMultiIO)
-        {
-            if (m_featuresBufferMultiIO[i] != NULL)
-            {
-                delete[] m_featuresBufferMultiIO[i];
-                m_featuresBufferMultiIO[i] = NULL;
-            }
-        }
-    }
+    foreach_index(i, m_featuresBufferMultiIO)
+        delete[] m_featuresBufferMultiIO[i];
 
-    if (!m_labelsBufferMultiIO.empty())
-    {
-        foreach_index (i, m_labelsBufferMultiIO)
-        {
-            if (m_labelsBufferMultiIO[i] != NULL)
-            {
-                delete[] m_labelsBufferMultiIO[i];
-                m_labelsBufferMultiIO[i] = NULL;
-            }
-        }
-    }
+    foreach_index(i, m_labelsBufferMultiIO)
+        delete[] m_labelsBufferMultiIO[i];
 
     for (size_t i = 0; i < m_numberOfuttsPerMinibatch; i++)
     {
-        if (m_featuresBufferMultiUtt[i] != NULL)
-        {
-            delete[] m_featuresBufferMultiUtt[i];
-            m_featuresBufferMultiUtt[i] = NULL;
-        }
-        if (m_labelsBufferMultiUtt[i] != NULL)
-        {
-            delete[] m_labelsBufferMultiUtt[i];
-            m_labelsBufferMultiUtt[i] = NULL;
-        }
+        delete[] m_featuresBufferMultiUtt[i];
+        delete[] m_labelsBufferMultiUtt[i];
     }
 
     foreach_index (i, m_trainingOrTestingFeatureSections)
-    {
-        if (m_trainingOrTestingFeatureSections[i] != NULL)
-        {
-            delete m_trainingOrTestingFeatureSections[i];
-            m_trainingOrTestingFeatureSections[i] = NULL;
-        }
-    }
+        delete m_trainingOrTestingFeatureSections[i];
 
     foreach_index (i, m_writingFeatureSections)
-    {
-        if (m_writingFeatureSections[i] != NULL)
-        {
-            delete m_writingFeatureSections[i];
-            m_writingFeatureSections[i] = NULL;
-        }
-    }
+        delete m_writingFeatureSections[i];
 }
 
 // StartMinibatchLoop - Startup a minibatch loop
@@ -900,7 +846,7 @@ void HTKMLFReader<ElemType>::StartMinibatchLoopToWrite(size_t mbSize, size_t /*e
 //             [out] each matrix resized if necessary containing data.
 // returns - true if there are more minibatches, false if no more minibatchs remain
 template <class ElemType>
-bool HTKMLFReader<ElemType>::GetMinibatch(std::map<std::wstring, Matrix<ElemType>*>& matrices)
+bool HTKMLFReader<ElemType>::GetMinibatch(StreamMinibatchInputs& matrices)
 {
     if (m_trainOrTest)
     {
@@ -921,7 +867,7 @@ bool HTKMLFReader<ElemType>::GetMinibatch(std::map<std::wstring, Matrix<ElemType
 // if startFrame = 5, endFrame = 10, then we copy frames 5, 6, 7, 8, 9.
 template <class ElemType>
 bool HTKMLFReader<ElemType>::PopulateUtteranceInMinibatch(
-    const std::map<std::wstring, Matrix<ElemType>*>& matrices,
+    const StreamMinibatchInputs& matrices,
     size_t uttIndex, size_t startFrame,
     size_t endFrame, size_t mbSize, size_t mbOffset)
 {
@@ -942,7 +888,8 @@ bool HTKMLFReader<ElemType>::PopulateUtteranceInMinibatch(
     for (auto iter = matrices.begin(); iter != matrices.end(); iter++)
     {
         if (m_nameToTypeMap[iter->first] == InputOutputTypes::real)
-        { // Features.
+        { 
+            // Features.
             size_t id = m_featureNameToIdMap[iter->first];
             size_t dim = m_featureNameToDimMap[iter->first];
 
@@ -952,14 +899,16 @@ bool HTKMLFReader<ElemType>::PopulateUtteranceInMinibatch(
                 m_featuresBufferAllocatedMultiIO[id] = dim * mbSize * m_numberOfuttsPerMinibatch;
             }
             else if (m_featuresBufferAllocatedMultiIO[id] < dim * mbSize * m_numberOfuttsPerMinibatch)
-            { // Buffer too small, we have to increase it.
+            { 
+                // Buffer too small, we have to increase it.
                 delete[] m_featuresBufferMultiIO[id];
                 m_featuresBufferMultiIO[id] = new ElemType[dim * mbSize * m_numberOfuttsPerMinibatch];
                 m_featuresBufferAllocatedMultiIO[id] = dim * mbSize * m_numberOfuttsPerMinibatch;
             }
 
             if (sizeof(ElemType) == sizeof(float))
-            { // For float, we copy entire column.
+            { 
+                // For float, we copy entire column.
                 for (size_t j = startFrame, k = 0; j < endFrame; j++, k++)
                 {
                     memcpy_s(&m_featuresBufferMultiIO[id][((k + mbOffset) * m_numberOfuttsPerMinibatch + uttIndex) * dim],
@@ -969,18 +918,21 @@ bool HTKMLFReader<ElemType>::PopulateUtteranceInMinibatch(
                 }
             }
             else
-            { // For double, we have to copy element by element.
+            { 
+                // For double, we have to copy element by element.
                 for (size_t j = startFrame, k = 0; j < endFrame; j++, k++)
                 {
                     for (int d = 0; d < dim; d++)
                     {
-                        m_featuresBufferMultiIO[id][((k + mbOffset) * m_numberOfuttsPerMinibatch + uttIndex) * dim + d] = m_featuresBufferMultiUtt[uttIndex][j * dim + d + m_featuresStartIndexMultiUtt[id + uttIndex * numOfFea]];
+                        m_featuresBufferMultiIO[id][((k + mbOffset) * m_numberOfuttsPerMinibatch + uttIndex) * dim + d] = 
+                            m_featuresBufferMultiUtt[uttIndex][j * dim + d + m_featuresStartIndexMultiUtt[id + uttIndex * numOfFea]];
                     }
                 }
             }
         }
         else if (m_nameToTypeMap[iter->first] == InputOutputTypes::category)
-        { // Labels.
+        { 
+            // Labels.
             size_t id = m_labelNameToIdMap[iter->first];
             size_t dim = m_labelNameToDimMap[iter->first];
 
@@ -1000,7 +952,8 @@ bool HTKMLFReader<ElemType>::PopulateUtteranceInMinibatch(
             {
                 for (int d = 0; d < dim; d++)
                 {
-                    m_labelsBufferMultiIO[id][((k + mbOffset) * m_numberOfuttsPerMinibatch + uttIndex) * dim + d] = m_labelsBufferMultiUtt[uttIndex][j * dim + d + m_labelsStartIndexMultiUtt[id + uttIndex * numOfLabel]];
+                    m_labelsBufferMultiIO[id][((k + mbOffset) * m_numberOfuttsPerMinibatch + uttIndex) * dim + d] = 
+                        m_labelsBufferMultiUtt[uttIndex][j * dim + d + m_labelsStartIndexMultiUtt[id + uttIndex * numOfLabel]];
                 }
             }
         }
@@ -1010,7 +963,7 @@ bool HTKMLFReader<ElemType>::PopulateUtteranceInMinibatch(
 
 template <class ElemType>
 bool HTKMLFReader<ElemType>::GetOneMinibatchToTrainOrTestDataBuffer(
-    const std::map<std::wstring, Matrix<ElemType>*>& matrices)
+    const StreamMinibatchInputs& matrices)
 {
     bool skip = false;
 
@@ -1411,7 +1364,7 @@ void HTKMLFReader<ElemType>::CopyMinibatchToBuffer()
 template <class ElemType>
 void HTKMLFReader<ElemType>::CopyMinibatchFromBufferToMatrix(
     size_t index,
-    std::map<std::wstring, Matrix<ElemType>*>& matrices)
+    StreamMinibatchInputs& matrices)
 {
     assert(m_minibatchBuffer.size() > index);
 
@@ -1423,7 +1376,7 @@ void HTKMLFReader<ElemType>::CopyMinibatchFromBufferToMatrix(
     // Copies data to the matrix.
     for (auto iter = matrices.begin(); iter != matrices.end(); iter++)
     {
-        Matrix<ElemType>& data = *matrices[iter->first];
+        Matrix<ElemType>& data = matrices.GetInputMatrix<ElemType>(iter->first);
         if (m_nameToTypeMap[iter->first] == InputOutputTypes::real)
         {
             size_t id = m_featureNameToIdMap[iter->first];
@@ -1452,34 +1405,36 @@ void HTKMLFReader<ElemType>::CopyMinibatchFromBufferToMatrix(
             {
                 if (m_getMinibatchCopy)
                 {
-                    if (data.GetNumCols() != m_currentMBSize * m_numberOfuttsPerMinibatch)
+                    assert(m_currentMBSize * m_numberOfuttsPerMinibatch == m_pMBLayout->GetNumCols());
+                    if (data.GetNumCols() != m_pMBLayout->GetNumCols())
                     {
-                        matrices[iter->first]->Resize(data.GetNumRows(),
-                                                      m_currentMBSize * m_numberOfuttsPerMinibatch);
+                        data.Resize(data.GetNumRows(), m_pMBLayout->GetNumCols());
                     }
-                    matrices[iter->first]->SetValue(0);
+                    matrices.GetInputMatrix<ElemType>(iter->first).SetValue(0);
                 }
                 else
                 {
                     m_uttDerivBuffer->GetDerivative(m_minibatchUttInfo,
                                                     m_pMBLayout,
-                                                    matrices[iter->first]);
+                                                    &matrices.GetInputMatrix<ElemType>(iter->first)); // TODO: use a reference instead of a ptr
                 }
             }
             else if (m_nameToTypeMap[iter->first] == InputOutputTypes::readerObj)
             {
                 if (m_getMinibatchCopy)
                 {
-                    if (data.GetNumCols() != 1)
+                    assert(m_currentMBSize * m_numberOfuttsPerMinibatch == m_pMBLayout->GetNumCols());
+                    if (data.GetNumCols() != m_pMBLayout->GetNumCols())
                     {
-                        data.Resize(1, 1);
+                        data.Resize(1, m_pMBLayout->GetNumCols());
                     }
                     data.SetValue(0);
                 }
                 else
                 {
                     m_uttDerivBuffer->GetObjective(m_minibatchUttInfo,
-                                                   matrices[iter->first]);
+                                                   m_pMBLayout,
+                                                   &matrices.GetInputMatrix<ElemType>(iter->first)); // TODO: use a reference instead of a ptr
                 }
             }
         }
@@ -1497,11 +1452,11 @@ void HTKMLFReader<ElemType>::CopyMinibatchToMatrix(
     size_t size,
     const vector<ElemType*>& featureBuffer,
     const vector<ElemType*>& labelBuffer,
-    std::map<std::wstring, Matrix<ElemType>*>& matrices) const
+    StreamMinibatchInputs& matrices) const
 {
     for (auto iter = matrices.begin(); iter != matrices.end(); iter++)
     {
-        Matrix<ElemType>& data = *matrices[iter->first];
+        Matrix<ElemType>& data = matrices.GetInputMatrix<ElemType>(iter->first);
         if (m_nameToTypeMap.at(iter->first) == InputOutputTypes::real)
         {
             size_t id = m_featureNameToIdMap.at(iter->first);
@@ -1520,18 +1475,19 @@ void HTKMLFReader<ElemType>::CopyMinibatchToMatrix(
         {
             if (m_nameToTypeMap.at(iter->first) == InputOutputTypes::readerDeriv)
             {
-                if (data.GetNumCols() != m_currentMBSize * m_numberOfuttsPerMinibatch)
+                assert(m_currentMBSize * m_numberOfuttsPerMinibatch == m_pMBLayout->GetNumCols());
+                if (data.GetNumCols() != m_pMBLayout->GetNumCols())
                 {
-                    data.Resize(data.GetNumRows(),
-                                m_currentMBSize * m_numberOfuttsPerMinibatch);
+                    data.Resize(data.GetNumRows(), m_pMBLayout->GetNumCols());
                 }
                 data.SetValue(0);
             }
             else if (m_nameToTypeMap.at(iter->first) == InputOutputTypes::readerObj)
             {
-                if (data.GetNumCols() != 1)
+                assert(m_currentMBSize * m_numberOfuttsPerMinibatch == m_pMBLayout->GetNumCols());
+                if (data.GetNumCols() != m_pMBLayout->GetNumCols())
                 {
-                    data.Resize(1, 1);
+                    data.Resize(1, m_pMBLayout->GetNumCols());
                 }
                 data.SetValue(0);
             }
@@ -1541,7 +1497,7 @@ void HTKMLFReader<ElemType>::CopyMinibatchToMatrix(
 
 template <class ElemType>
 bool HTKMLFReader<ElemType>::GetMinibatchToTrainOrTest(
-    std::map<std::wstring, Matrix<ElemType>*>& matrices)
+    StreamMinibatchInputs& matrices)
 {
     // We either copy a new minibatch from buffer or read one from minibatch
     // iterator.
@@ -1585,7 +1541,7 @@ bool HTKMLFReader<ElemType>::GetMinibatchToTrainOrTest(
 }
 
 template <class ElemType>
-bool HTKMLFReader<ElemType>::GetMinibatchToWrite(std::map<std::wstring, Matrix<ElemType>*>& matrices)
+bool HTKMLFReader<ElemType>::GetMinibatchToWrite(StreamMinibatchInputs& matrices)
 {
     std::map<std::wstring, size_t>::iterator iter;
     if (m_checkDictionaryKeys)
@@ -1636,15 +1592,14 @@ bool HTKMLFReader<ElemType>::GetMinibatchToWrite(std::map<std::wstring, Matrix<E
 
         // populate input matrices
         bool first = true;
-        typename std::map<std::wstring, Matrix<ElemType>*>::iterator iter;
-        for (iter = matrices.begin(); iter != matrices.end(); iter++)
+        for (auto iter = matrices.begin(); iter != matrices.end(); iter++)
         {
             // dereference matrix that corresponds to key (input/output name) and
             // populate based on whether its a feature or a label
 
             if (m_nameToTypeMap.find(iter->first) != m_nameToTypeMap.end() && m_nameToTypeMap[iter->first] == InputOutputTypes::real)
             {
-                Matrix<ElemType>& data = *matrices[iter->first]; // can be features or labels
+                Matrix<ElemType>& data = matrices.GetInputMatrix<ElemType>(iter->first); // can be features or labels
                 size_t id = m_featureNameToIdMap[iter->first];
                 size_t dim = m_featureNameToDimMap[iter->first];
 
@@ -1697,7 +1652,7 @@ bool HTKMLFReader<ElemType>::GetMinibatchToWrite(std::map<std::wstring, Matrix<E
             }
             else
             { // Resizes other inputs so they won't affect actual minibatch size.
-                Matrix<ElemType>& data = *matrices[iter->first];
+                Matrix<ElemType>& data = matrices.GetInputMatrix<ElemType>(iter->first);
                 data.Resize(data.GetNumRows(), 1);
             }
         }
@@ -1923,7 +1878,7 @@ bool HTKMLFReader<ElemType>::ReNewBufferForMultiIO(size_t i)
 template <class ElemType>
 bool HTKMLFReader<ElemType>::GetMinibatchCopy(
     std::vector<std::vector<std::pair<wstring, size_t>>>& uttInfo,
-    std::map<std::wstring, Matrix<ElemType>*>& matrices,
+    StreamMinibatchInputs& matrices,
     MBLayoutPtr pMBLayout)
 {
     // We need to get a "copy" of the minibatch to do the forward
@@ -1951,9 +1906,10 @@ bool HTKMLFReader<ElemType>::GetMinibatchCopy(
 template <class ElemType>
 bool HTKMLFReader<ElemType>::SetNetOutput(
     const std::vector<std::vector<std::pair<wstring, size_t>>>& uttInfo,
-    const Matrix<ElemType>& outputs,
+    const MatrixBase& outputsb,
     const MBLayoutPtr pMBLayout)
 {
+    const auto& outputs = dynamic_cast<const Matrix<ElemType>&>(outputsb); // TODO: a NULL check, to be sure
     // Set the likelihoods for the utterance with which we can comput the
     // derivatives. Note that the minibatch may only contain partial output
     // for the utterance, <m_uttDerivBuffer> takes care of "gluing" them
@@ -1969,7 +1925,7 @@ bool HTKMLFReader<ElemType>::SetNetOutput(
 // GetLabelMapping - Gets the label mapping from integer to type in file
 // mappingTable - a map from numeric datatype to native label type stored as a string
 template <class ElemType>
-const std::map<typename IDataReader<ElemType>::LabelIdType, typename IDataReader<ElemType>::LabelType>& HTKMLFReader<ElemType>::GetLabelMapping(const std::wstring& /*sectionName*/)
+const std::map<IDataReader::LabelIdType, IDataReader::LabelType>& HTKMLFReader<ElemType>::GetLabelMapping(const std::wstring& /*sectionName*/)
 {
     return m_idToLabelMap;
 }
@@ -1978,7 +1934,7 @@ const std::map<typename IDataReader<ElemType>::LabelIdType, typename IDataReader
 // labelMapping - mapping table from label values to IDs (must be 0-n)
 // note: for tasks with labels, the mapping table must be the same between a training run and a testing run
 template <class ElemType>
-void HTKMLFReader<ElemType>::SetLabelMapping(const std::wstring& /*sectionName*/, const std::map<typename IDataReader<ElemType>::LabelIdType, LabelType>& labelMapping)
+void HTKMLFReader<ElemType>::SetLabelMapping(const std::wstring& /*sectionName*/, const std::map<LabelIdType, LabelType>& labelMapping)
 {
     m_idToLabelMap = labelMapping;
 }
@@ -2053,28 +2009,14 @@ bool HTKMLFReader<ElemType>::GetData(const std::wstring& /*sectionName*/, size_t
 }
 
 template <class ElemType>
-bool HTKMLFReader<ElemType>::DataEnd(EndDataType endDataType)
+bool HTKMLFReader<ElemType>::DataEnd()
 {
     // each minibatch is considered a "sentence"
-    // other datatypes not really supported...
-    // assert(endDataType == endDataSentence);
-    // for the truncated BPTT, we need to support check wether it's the end of data
-    bool ret = false;
-    switch (endDataType)
-    {
-    case endDataNull:
-    case endDataEpoch:
-    case endDataSet:
-        throw std::logic_error("DataEnd: does not support endDataTypes: endDataNull, endDataEpoch and endDataSet");
-        break;
-    case endDataSentence:
-        if (m_truncated)
-            ret = m_sentenceEnd[0];
-        else
-            ret = true; // useless in current condition
-        break;
-    }
-    return ret;
+    // for the truncated BPTT, we need to support check whether it's the end of data
+    if (m_truncated)
+        return m_sentenceEnd[0];
+    else
+        return true; // useless in current condition
 }
 
 template <class ElemType>

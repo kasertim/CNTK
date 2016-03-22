@@ -21,6 +21,7 @@
 #include "MPIWrapper.h" // TODO: does not belong here
 #include <string>
 #include <vector>
+#include <stack>
 #include <list>
 #include <set>
 
@@ -63,7 +64,11 @@ void ComputationNetwork::ClearNetwork()
     //         Once we allow that (BrainScript editing), we need proper cycle detectors. Luckily, we know our cycles, so it won't be too hard.
     //         Or just use weak ptrs.
     for (auto& iter : m_nameToNodeMap)
-        iter.second->DetachInputs();
+    {
+        auto& node = iter.second;
+        node->SetEnvironment(nullptr);
+        node->DetachInputs();
+    }
 
     m_nameToNodeMap.clear();
 
@@ -85,17 +90,11 @@ void ComputationNetwork::SaveEdited(const wstring& fileName, const FileOptions f
 void ComputationNetwork::Save(const wstring& fileName, const FileOptions fileFormat) const
 {
     VerifyIsCompiled("Save");
-    // In case of parallel training only the main node should we saving the model to prevent
-    // the parallel training nodes from colliding to write the same file
-    // TODO: This does not belong here.
-    if ((g_mpi == nullptr) || g_mpi->IsMainNode())
-    {
-        // Saving into temporary file and then renaming it to the requested fileName
-        // This is a standard trick to avoid havign corrupted model files if process dies during writing
-        wstring tmpFileName = fileName + L".tmp";
-        SaveToFileImpl(tmpFileName, fileFormat);
-        renameOrDie(tmpFileName, fileName);
-    }
+    // Saving into temporary file and then renaming it to the requested fileName
+    // This is a standard trick to avoid havign corrupted model files if process dies during writing
+    wstring tmpFileName = fileName + L".tmp";
+    SaveToFileImpl(tmpFileName, fileFormat);
+    renameOrDie(tmpFileName, fileName);
 }
 
 // TODO: how does the file distinguish float vs double nodes?
@@ -171,16 +170,6 @@ void ComputationNetwork::SaveToFileImpl(const wstring& fileName, const FileOptio
     }
     fstream.PutMarker(FileMarker::fileMarkerEndSection, L"EOutputNodes");
 
-    if (m_pairNodes.size() > 0)
-    {
-        fstream.PutMarker(FileMarker::fileMarkerBeginSection, L"BPairNodes");
-
-        fstream << m_pairNodes.size();
-        for (size_t i = 0; i < m_pairNodes.size(); i++)
-            fstream << m_pairNodes[i]->NodeName();
-        fstream.PutMarker(FileMarker::fileMarkerEndSection, L"EPairNodes");
-    }
-
     fstream.PutMarker(FileMarker::fileMarkerEndSection, L"ERootNodes");
 
     fstream.PutMarker(FileMarker::fileMarkerEndSection, L"ECN");
@@ -203,6 +192,8 @@ void ComputationNetwork::ReadPersistableParameters(File& fstream, bool create)
         fstream >> modelVersion;
         fstream.GetMarker(FileMarker::fileMarkerEndSection, L"EVersion");
     }
+    if (modelVersion > CURRENT_CNTK_MODEL_VERSION)
+        InvalidArgument("Read: The model file has a newer format version (%d) than this CNTK version can handle (%d).", (int)modelVersion, (int)CURRENT_CNTK_MODEL_VERSION);
 
     size_t numNodes;
     fstream >> numNodes;
@@ -225,7 +216,17 @@ void ComputationNetwork::ReadPersistableParameters(File& fstream, bool create)
         if (create) // loaded from scratch
             AddNodeToNet(node);
         else                      // reloaded existing
-            node->Validate(true); // nothing that propagates should have changed  --TODO: have a more rigid mechanism to prevent resizing; this should only reload the model parameters
+        {
+            let old = node->GetSampleLayout();
+            let changed = ValidateNode(node, /*isFinalValidationPass=*/true);
+            if (changed)
+            {
+                let upd = node->GetSampleLayout();
+                fprintf(stderr, "ValidateSubNetwork: %ls %ls operation changed, from [%s] to [%s].", node->NodeName().c_str(), node->OperationName().c_str(),
+                    string(old).c_str(), string(upd).c_str());
+                //LogicError("ValidateSubNetwork: %ls %ls operation changed during reload or re-validation.", node->NodeName().c_str(), node->OperationName().c_str());
+            }
+        }
     }
 
     fstream.GetMarker(FileMarker::fileMarkerEndSection, L"ENodeList");
@@ -234,11 +235,11 @@ void ComputationNetwork::ReadPersistableParameters(File& fstream, bool create)
 // deserialize the model
 // This does not post-process the model (CompileNetwork()). Use Load() instead.
 template <class ElemType>
-void ComputationNetwork::Read(const wstring& fileName, const FileOptions fileFormat, const bool /*bAllowNoCriterionNode --unused*/, ComputationNetwork* anotherNetwork)
+void ComputationNetwork::Read(const wstring& fileName)
 {
     ClearNetwork();
 
-    File fstream(fileName, fileFormat | FileOptions::fileOptionsRead);
+    File fstream(fileName, FileOptions::fileOptionsBinary | FileOptions::fileOptionsRead);
 
     ReadPersistableParameters<ElemType>(fstream, true);
 
@@ -263,7 +264,7 @@ void ComputationNetwork::Read(const wstring& fileName, const FileOptions fileFor
             vector<ComputationNodeBasePtr> childrenNodes;
             childrenNodes.resize(numChildren);
             for (int j = 0; j < numChildren; j++)
-                childrenNodes[j] = GetNodeFromName(childrenNames[j], anotherNetwork);
+                childrenNodes[j] = GetNodeFromName(childrenNames[j]);
 
             nodePtr->AttachInputs(childrenNodes);
         }
@@ -315,7 +316,7 @@ void ComputationNetwork::Read(const wstring& fileName, const FileOptions fileFor
             }
         }
 
-        // TODO: this section is defunct, skip over
+        // this section is for back compat only, skip over
         if (fstream.TryGetMarker(FileMarker::fileMarkerBeginSection, L"BNodesReqMultiSeqHandling"))
         {
             fprintf(stderr, "WARNING: Ignoring defunct 'BNodesReqMultiSeqHandling' section in input file.\n");
@@ -347,14 +348,12 @@ void ComputationNetwork::Read(const wstring& fileName, const FileOptions fileFor
             fstream.GetMarker(FileMarker::fileMarkerEndSection, L"EOutputNodes");
         }
 
+        // this section is for back compat only, skip over
         if (fstream.TryGetMarker(FileMarker::fileMarkerBeginSection, L"BPairNodes"))
         {
             fstream >> num;
-            for (size_t i = 0; i < num; i++)
-            {
-                fstream >> nodeName;
-                m_pairNodes.push_back(GetNodeFromName(nodeName));
-            }
+            if (num > 0)
+                RuntimeError("Read: PairNodes are no longer supported");
             fstream.GetMarker(FileMarker::fileMarkerEndSection, L"EPairNodes");
         }
     }
@@ -395,81 +394,74 @@ bool ComputationNetwork::IsTypicalCriterionNode(ComputationNodeBasePtr nodePtr)
     return false;
 }
 
-template <class N>
-void ComputationNetwork::GetNodesRequiringX(list<ComputationNodeBasePtr>& nodesRequiringX, const ComputationNodeBasePtr& rootNode, bool checkComputed)
-{
-    if (!rootNode) // find nodes from all available nodes
-    {
-        for (const auto& nodep : m_nameToNodeMap)
-        {
-            auto node = dynamic_pointer_cast<N>(nodep.second);
-            if (node)
-            {
-                assert(node->RequiresPreCompute());
-                if (!checkComputed || !node->HasComputed())
-                    nodesRequiringX.push_back(node);
-            }
-        }
-    }
-    else // or for calculating a specific node
-    {
-        for (const auto& nodei : GetEvalOrder(rootNode))
-        {
-            auto node = dynamic_pointer_cast<N>(nodei);
-            if (node)
-            {
-                assert(node->RequiresPreCompute());
-                if (!checkComputed || !node->HasComputed())
-                    nodesRequiringX.push_back(node);
-            }
-        }
-    }
-    nodesRequiringX.unique();
-}
-
 // return list of nodes that require precomputation and not precomputed yet
 list<ComputationNodeBasePtr> ComputationNetwork::GetNodesRequiringPreComputation(const ComputationNodeBasePtr& rootNode, bool checkComputed)
 {
-    list<ComputationNodeBasePtr> nodesRequiringX;
-    GetNodesRequiringX<PreComputedNodeBase<float>>(nodesRequiringX, rootNode, checkComputed);
-    GetNodesRequiringX<PreComputedNodeBase<double>>(nodesRequiringX, rootNode, checkComputed);
-    return nodesRequiringX;
+    list<ComputationNodeBasePtr> nodes;
+    for (const auto& node : GetEvalOrder(rootNode))
+    {
+        auto pcnode = dynamic_pointer_cast<IPreComputeNode>(node);
+        if (pcnode)
+        {
+            assert(node->RequiresPreCompute());
+            if (!checkComputed || !pcnode->HasComputed())
+                nodes.push_back(node);
+        }
+    }
+    return nodes;
 }
 
 // create the m_inputValues[] and m_learnableParameters[] lists
+// This enumerates all leaves reachable from rootNode.
+// Leaves are:
+//  - inputs
+//  - learnable parameters
+// It does not traverse disabled ones, i.e.
+//  - inputs that are only reachable through PrecomputeNodes that have completed computation
+//  - learnable parameters that are constants
 void ComputationNetwork::CollectInputAndLearnableParameters(const ComputationNodeBasePtr& rootNode)
 {
     assert(m_inputValues.find(rootNode) == m_inputValues.end()); // this function must only be called once
     assert(m_learnableParameters.find(rootNode) == m_learnableParameters.end());
 
-    const list<ComputationNodeBasePtr>& nodes = GetEvalOrder(rootNode);
+    // gather the lists
+    set<ComputationNodeBasePtr> visited;
+    list<ComputationNodeBasePtr> inputs, learnableParameters;
+    if (rootNode)
+        CollectInputAndLearnableParametersRec(rootNode, visited, inputs, learnableParameters);
+    else
+        for (const auto& root : m_allRoots)
+            CollectInputAndLearnableParametersRec(root, visited, inputs, learnableParameters);
 
-    // collect input values for given root
-    list<ComputationNodeBasePtr> inputs;
-    for (const auto& node : nodes)
+    // sort learnable parameters by name so that we get consistent order when load it from saved file
+    learnableParameters.sort([](const ComputationNodeBasePtr& a, const ComputationNodeBasePtr& b)
     {
-        if (node->OperationName() == OperationNameOf(InputValue) || node->OperationName() == OperationNameOf(SparseInputValue))
-            inputs.push_back(node);
-    }
-    m_inputValues[rootNode] = inputs;
+        return a->NodeName() < b->NodeName();
+    });
 
-    // instead of collecting the nodes themselves, collect the names (they will be sorted below)
-    list<wstring> learnableParameterNames;
-    for (auto nodeIter = nodes.begin(); nodeIter != nodes.end(); nodeIter++)
-    {
-        ComputationNodeBasePtr node = *nodeIter;
-        if (node->OperationName() == OperationNameOf(LearnableParameter) && node->IsParameterUpdateRequired())
-            learnableParameterNames.push_back(node->NodeName());
-    }
-
-    // sort names so that we get consistent order when load it from saved file
-    learnableParameterNames.sort();
-
-    // now collect the actual nodes in the sort order of their node names
-    list<ComputationNodeBasePtr> learnableParameters;
-    for (const auto& nodeNameIter : learnableParameterNames)
-        learnableParameters.push_back(GetNodeFromName(nodeNameIter));
+    m_inputValues[rootNode] = move(inputs);
     m_learnableParameters[rootNode] = move(learnableParameters);
+}
+
+void ComputationNetwork::CollectInputAndLearnableParametersRec(const ComputationNodeBasePtr& node, set<ComputationNodeBasePtr>& visited, list<ComputationNodeBasePtr>& inputs, list<ComputationNodeBasePtr>& learnableParameters)
+{
+    if (visited.find(node) != visited.end())    // allready got this one
+        return;
+    else if (node->OperationName() == OperationNameOf(InputValue) || node->OperationName() == OperationNameOf(SparseInputValue))
+        inputs.push_back(node);
+    else if (node->OperationName() == OperationNameOf(LearnableParameter) && node->IsParameterUpdateRequired())
+        learnableParameters.push_back(node);
+    else
+    {
+        // PreComputeNodes that are already done should not be traversed
+        auto pcnode = dynamic_pointer_cast<IPreComputeNode>(node);
+        if (pcnode && pcnode->HasComputed())
+            return;
+        // recurse
+        visited.insert(node);
+        for (const auto & input : node->GetInputs())
+            CollectInputAndLearnableParametersRec(input, visited, inputs, learnableParameters);
+    }
 }
 
 template <class ElemType>
@@ -477,19 +469,45 @@ template <class ElemType>
 {
     if (dropoutRate != prevDropoutRate)
     {
-        fprintf(stderr, "Switching dropout rate to %.8g.\n", dropoutRate);
+        fprintf(stderr, "Setting dropout rate to %.8g.\n", dropoutRate);
+        // TODO: Change this to use an interface that is independent of <ElemType>.
         list<ComputationNodeBasePtr> dropoutNodes = net->GetNodesWithType(OperationNameOf(DropoutNode), criterionNode);
         if (dropoutNodes.size() == 0 && dropoutRate > 0)
             fprintf(stderr, "WARNING: there is no dropout node.\n");
         else
-            for (auto nodeIter = dropoutNodes.begin(); nodeIter != dropoutNodes.end(); nodeIter++)
+        {
+            for (auto& nodeIter: dropoutNodes)
             {
-                auto node = dynamic_pointer_cast<DropoutNode<ElemType>>(*nodeIter);
+                auto node = dynamic_pointer_cast<DropoutNode<ElemType>>(nodeIter);
                 node->SetDropoutRate(dropoutRate);
                 node->SetRandomSeed(dropOutSeed++);
             }
+        }
 
         prevDropoutRate = dropoutRate;
+    }
+}
+
+template <class ElemType>
+/*static*/ void ComputationNetwork::SetBatchNormalizationTimeConstant(ComputationNetworkPtr net, const ComputationNodeBasePtr& criterionNode, const double normalizationTimeConstant, double& prevNormalizationTimeConstant)
+{
+    if (normalizationTimeConstant != prevNormalizationTimeConstant && normalizationTimeConstant != numeric_limits<double>::infinity())
+    {
+        fprintf(stderr, "Setting batch normalization time constant to %.8g.\n", normalizationTimeConstant);
+        // TODO: Change this to use an interface that is independent of <ElemType>.
+        list<ComputationNodeBasePtr> batchNormalizationNodes = net->GetNodesWithType(OperationNameOf(BatchNormalizationNode), criterionNode);
+        if (batchNormalizationNodes.size() == 0 && normalizationTimeConstant != numeric_limits<double>::infinity())
+            fprintf(stderr, "WARNING: there is no batch normalization node.\n");
+        else
+        { 
+            for (auto& nodeIter : batchNormalizationNodes)
+            {
+                auto node = dynamic_pointer_cast<BatchNormalizationNode<ElemType>>(nodeIter);
+                node->SetNormalizationTimeConstant(normalizationTimeConstant);
+            }
+        }
+
+        prevNormalizationTimeConstant = normalizationTimeConstant;
     }
 }
 
@@ -530,11 +548,12 @@ void ComputationNetwork::SetSeqParam(ComputationNetworkPtr net,
 
 /*static*/ void ComputationNetwork::SetMaxTempMemSizeForCNN(ComputationNetworkPtr net, const ComputationNodeBasePtr& criterionNode, const size_t maxTempMemSizeInSamples)
 {
-    fprintf(stderr, "Set Max Temp Mem Size For Convolution Nodes to %lu samples.\n", maxTempMemSizeInSamples);
+    if (maxTempMemSizeInSamples > 0)
+        fprintf(stderr, "Setting max temp memory size for Convolution operations to %lu samples.\n", maxTempMemSizeInSamples);
     list<ComputationNodeBasePtr> convolutionNodes = net->GetNodesWithType(OperationNameOf(ConvolutionNode), criterionNode);
     if (convolutionNodes.size() == 0 && maxTempMemSizeInSamples != 0)
     {
-        fprintf(stderr, "WARNING: there is no convolution node.\n");
+        fprintf(stderr, "WARNING: No Convolution operation found.\n");
     }
     else
     {
@@ -750,8 +769,6 @@ void ComputationNetwork::DescribeNetworkUsingDot(list<ComputationArc>& arcs,
         line = line + msra::strfun::wstrprintf(L"\"%ls\" ", x->GetName().c_str());
     for (const auto& x : m_outputNodes)
         line = line + msra::strfun::wstrprintf(L"\"%ls\" ", x->GetName().c_str());
-    for (const auto& x : m_pairNodes)
-        line = line + msra::strfun::wstrprintf(L"\"%ls\" ", x->GetName().c_str());
     for (const auto& x : m_evalNodes)
         line = line + msra::strfun::wstrprintf(L"\"%ls\" ", x->GetName().c_str());
 
@@ -898,8 +915,7 @@ void ComputationNetwork::PerformSVDecomposition(const map<wstring, float>& SVDCo
             if (!ptr)
                 continue;
 
-            Matrix<ElemType> W = ptr->Value();
-            if (W.GetNumCols() == 1 || W.GetNumRows() == 1)
+            if (ptr->Value().GetNumCols() == 1 || ptr->Value().GetNumRows() == 1)
                 continue;
 
             // still here ?
@@ -931,7 +947,7 @@ void ComputationNetwork::PerformSVDecomposition(const map<wstring, float>& SVDCo
             shared_ptr<ComputationNode<ElemType>> pNode = dynamic_pointer_cast<LearnableParameter<ElemType>>(m_nameToNodeMap[name]);
 
             // Step 1. do SVD decomposition
-            Matrix<ElemType> A = pNode->ValueAsMatrix();
+            Matrix<ElemType> A = pNode->ValueAsMatrix().DeepClone();
 
             // it is a vector, no need to do it
             if (A.GetNumCols() == 1 || A.GetNumRows() == 1)
@@ -993,7 +1009,7 @@ void ComputationNetwork::PerformSVDecomposition(const map<wstring, float>& SVDCo
             redVT.Resize(r, n);
             redVT.AssignRowSliceValuesOf(VT, 0, r);
 
-            Matrix<ElemType> redS(r, (size_t) 1);
+            Matrix<ElemType> redS(r, (size_t)1, A.GetDeviceId());
             for (size_t i = 0; i < r; i++)
             {
                 ElemType sqrtsigma = (ElemType) sqrt((double) S(i, 0));
@@ -1004,13 +1020,15 @@ void ComputationNetwork::PerformSVDecomposition(const map<wstring, float>& SVDCo
             redVT.ColumnElementMultiplyWith(redS);
 
             // Step 2. create two new Parameter nodes and one Times node
-            wstring leftChildName = name + L"-U";
+            wstring leftChildName = name + L"-U";  // BUGBUG: With BrainScript, node names must be proper identifieres/variable expressions. We can't have '-' in node names.
             wstring rightChildName = name + L"-V";
             shared_ptr<ComputationNode<ElemType>> pLeft = AddNodeToNetWithElemType(New<LearnableParameter<ElemType>>(m_deviceId, leftChildName, m, r));
             shared_ptr<ComputationNode<ElemType>> pRight = AddNodeToNetWithElemType(New<LearnableParameter<ElemType>>(m_deviceId, rightChildName, r, n));
 
-            pLeft->ValueAsMatrix() = redU;
-            pRight->ValueAsMatrix() = redVT;
+            // TODO: We should be able to move instead of copy but it currently isn't strightforward
+            // due to redU and redVT being slices
+            pLeft->ValueAsMatrix() = redU.DeepClone();
+            pRight->ValueAsMatrix() = redVT.DeepClone();
 
             shared_ptr<ComputationNode<ElemType>> pTimes = AddNodeToNetAndAttachInputs(New<TimesNode<ElemType>>(m_deviceId, name + L"-SVD"), pLeft, pRight);
 
@@ -1023,22 +1041,390 @@ void ComputationNetwork::PerformSVDecomposition(const map<wstring, float>& SVDCo
     CompileNetwork();
 }
 
+// Helper class to form a logical DBN layer while exporting the network (used by SaveToDbnFile)
+class DbnLayer
+{
+public:
+    DbnLayer() : Node(nullptr), Bias(nullptr), Sigmoided(false) {}
+    ComputationNodeBasePtr Node;
+    ComputationNodeBasePtr Bias;
+    bool Sigmoided;
+    ~DbnLayer() {};
+};
+
+// Save network in the format of the Microsoft-internal legacy "DBN.exe" tool (this function is not useful outside of Microsoft)
+template <class ElemType>
+void ComputationNetwork::SaveToDbnFile(ComputationNetworkPtr net, const std::wstring& fileName) const 
+{
+    // Helper methods
+    auto VerifyTypeAll = [](const std::vector<ComputationNodeBasePtr>& nodes, const std::wstring& typeValue) -> bool
+    {
+        return std::find_if(nodes.begin(), nodes.end(), [&typeValue](ComputationNodeBasePtr node)->bool { return node->OperationName() != typeValue; }) == nodes.end();
+    };
+    auto GetNodeConsumers = [&net](const ComputationNodeBasePtr node) -> std::vector<ComputationNodeBasePtr>
+    {
+        std::vector<ComputationNodeBasePtr> consumers;
+        for (auto& item : net->GetAllNodes())
+        {
+            for (auto& input : item->GetInputs())
+            {
+                if (input == node)
+                {
+                    consumers.push_back(item);
+                    break;
+                }
+            }
+        }
+
+        return consumers;
+    };
+    auto GetFirstDifferentNode = [](const std::vector<ComputationNodeBasePtr>& list, const ComputationNodeBasePtr node) -> ComputationNodeBasePtr
+    {
+        auto foundNode = std::find_if(list.begin(), list.end(), [&node](ComputationNodeBasePtr item)->bool { return item != node; });
+        return foundNode == list.end() ? nullptr : *foundNode;
+    };
+    auto GetFirstNodeWithDifferentType = [](const std::vector<ComputationNodeBasePtr>& list, const std::wstring& type) -> ComputationNodeBasePtr
+    {
+        auto foundNode = std::find_if(list.begin(), list.end(), [&type](ComputationNodeBasePtr item)->bool { return item->OperationName() != type; });
+        return foundNode == list.end() ? nullptr : *foundNode;
+    };
+    auto WhereNode = [](const std::vector<ComputationNodeBasePtr>& nodes, const function<bool(ComputationNodeBasePtr)>& predicate) -> std::vector<ComputationNodeBasePtr>
+    {
+        std::vector<ComputationNodeBasePtr> results;
+
+        for (auto& node : nodes)
+        {
+            if (predicate(node))
+            {
+                results.push_back(node);
+            }
+        }
+
+        return results;
+    };
+    auto GetNodesWithType = [](const std::vector<ComputationNodeBasePtr>& list, const std::wstring& type) -> std::vector<ComputationNodeBasePtr>
+    {
+        std::vector<ComputationNodeBasePtr> results;
+
+        for (auto& node : list)
+        {
+            if (node->OperationName() == type)
+            {
+                results.push_back(node);
+            }
+        }
+
+        return results;
+    };
+    auto GetAllPriorNodes = [](ComputationNodeBasePtr node)->bool
+    {
+        std::wstring lowerName = node->GetName();
+        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+
+        return node->OperationName() == OperationNameOf(LearnableParameter) && (lowerName.find(L"prior") != wstring::npos);
+    };
+    auto FindReplicationContext = [](std::vector<ElemType>& arr)->int
+    {
+        for (int i = 25; i >= 1; i--)
+        {
+            int ctx = i * 2 + 1;
+            if (arr.size() % ctx != 0)
+                continue;
+
+            int baseLen = arr.size() / ctx;
+            bool matched = true;
+
+            for (int k = 1; k < ctx && matched; k++)
+            {
+                for (int j = 0; j < baseLen; j++)
+                {
+                    if (arr[j] != arr[k * baseLen + j])
+                    {
+                        matched = false;
+                        break;
+                    }
+                }
+            }
+
+            if (matched)
+                return ctx;
+        }
+
+        return 1;
+    };
+
+    // Get output node
+    std::list<ComputationNodeBasePtr> outputNodes = net->GetNodesWithType(OperationNameOf(ErrorPredictionNode));
+    ComputationNodeBasePtr outputNode = GetFirstNodeWithDifferentType(outputNodes.front()->GetInputs(), OperationNameOf(InputValue));
+
+    if (outputNode == nullptr)
+    {
+        RuntimeError("Cannot find output node");
+    }
+
+    std::list<ComputationNodeBasePtr> orderList;
+    std::stack<ComputationNodeBasePtr> nodeStack;
+
+    nodeStack.push(outputNode);
+
+    while (nodeStack.size() > 0)
+    {
+        auto node = nodeStack.top();
+        nodeStack.pop();
+        auto nodeInputs = node->GetInputs();
+        for (auto& input : nodeInputs)
+        {
+            bool cyclic = false;
+            for (auto& item : orderList)
+            {
+                if (item == input)
+                {
+                    Warning("Cyclic dependency on node '%ls'\n", item->GetName().c_str());
+                    cyclic = true;
+                }
+            }
+
+            if (!cyclic)
+                nodeStack.push(input);
+        }
+        orderList.push_back(node);
+    }
+
+    orderList.reverse();
+
+    // All multiplication nodes that multiply a symbolic variable
+    std::list<ComputationNodeBasePtr> multNodes;
+    typedef shared_ptr<DbnLayer> DbnLayerPtr;
+    std::list<DbnLayerPtr> dbnLayers;
+
+    for (auto& item : orderList)
+    {
+        if (item->OperationName() == OperationNameOf(TimesNode) && !VerifyTypeAll(item->GetInputs(), OperationNameOf(LearnableParameter)))
+        {
+            multNodes.push_back(item);
+        }
+    }
+
+    for (auto& node : multNodes)
+    {
+        std::vector<ComputationNodeBasePtr> consumers = GetNodeConsumers(node);
+        if (consumers.size() == 1)
+        {
+            bool sigmoided = false;
+            std::wstring layerId(node->GetName());
+
+            ComputationNodeBasePtr firstConsumer = consumers.front();
+
+            if (firstConsumer->OperationName() != OperationNameOf(PlusNode))
+            {
+                RuntimeError("Expected a plus node to consume the times node.");
+            }
+
+            ComputationNodeBasePtr bias = GetFirstDifferentNode(firstConsumer->GetInputs(), node);
+
+            auto consumer2 = GetNodeConsumers(consumers.front()).front();
+            if (consumer2->OperationName() == L"Sigmoid")
+            {
+                sigmoided = true;
+                layerId = consumer2->GetName();
+            }
+            else
+            {
+                layerId = firstConsumer->GetName();
+            }
+
+            // If one of its inputs was itself a multiplication node, then split it out
+            // into dbn-style.  
+            std::vector<ComputationNodeBasePtr> aggTimes = GetNodesWithType(node->GetInputs(), OperationNameOf(TimesNode));
+            if (aggTimes.size() > 0)
+            {
+                ComputationNodeBasePtr multNode = aggTimes.front();
+                DbnLayerPtr l1 = make_shared<DbnLayer>();
+                DbnLayerPtr l2 = make_shared<DbnLayer>();
+
+                auto firstInput = multNode->GetInputs()[0];
+                auto secondInput = multNode->GetInputs()[1];
+                l2->Bias = bias;
+                l2->Node = firstInput;
+
+                l1->Bias = nullptr;
+                l1->Node = secondInput;
+
+                l1->Sigmoided = false;
+                l2->Sigmoided = sigmoided;
+
+                dbnLayers.push_back(l1);
+                dbnLayers.push_back(l2);
+            }
+            else
+            {
+                auto paramNode = GetNodesWithType(node->GetInputs(), OperationNameOf(LearnableParameter)).front();
+                DbnLayerPtr l1 = make_shared<DbnLayer>();
+                l1->Bias = bias;
+                l1->Node = paramNode;
+                l1->Sigmoided = sigmoided;
+
+                dbnLayers.push_back(l1);
+            }
+        }
+    }
+
+    // Write the layers to the output 
+    // DBN wants std not invstd, so need to invert each element
+    std::vector<ComputationNodeBasePtr> normalizationNodes = GetNodesWithType(net->GetAllNodes(), OperationNameOf(PerDimMeanVarNormalizationNode));
+    if (normalizationNodes.size() == 0)
+    {
+        RuntimeError("Model does not contain at least one node with the '%ls' operation.", OperationNameOf(PerDimMeanVarNormalizationNode).c_str());
+    }
+
+    ComputationNodeBasePtr meanNode = normalizationNodes.front()->GetInputs()[1];
+    ComputationNodeBasePtr stdNode = normalizationNodes.front()->GetInputs()[2];
+    
+    Matrix<ElemType> meanNodeMatrix = meanNode->As<ComputationNode<ElemType>>()->Value().DeepClone();
+    Matrix<ElemType> invStdNodeMatrix(std::move(stdNode->As<ComputationNode<ElemType>>()->Value().DeepClone().ElementInverse()));
+    std::vector<ElemType> arr(invStdNodeMatrix.GetNumElements());
+    ElemType* refArr = &arr[0];
+    size_t arrSize = arr.size();
+    invStdNodeMatrix.CopyToArray(refArr, arrSize);
+
+    int ctx = FindReplicationContext(arr);
+    std::vector<ComputationNodeBasePtr> priorNodes = WhereNode(net->GetAllNodes(), GetAllPriorNodes);
+    if (priorNodes.size() != 1)
+    {
+        Warning("Could not reliably determine the prior node!");
+    }
+
+    // =================
+    // Write to the file
+    // =================
+    File fstream(fileName, FileOptions::fileOptionsBinary | FileOptions::fileOptionsWrite);
+
+    // local helper functions for writing stuff in DBN.exe-expected format
+    auto PutTag = [&fstream](const char * tag) { while (*tag) fstream << *tag++; };
+    auto PutString = [&fstream](const char * string) { fstream.WriteString(string, 0); };
+    auto PutInt = [&fstream](int val) { fstream << val; };
+
+    // write a DBN matrix object, optionally applying a function
+    auto PutMatrixConverted = [&](const Matrix<ElemType> * m, size_t maxelem, const char * name, float(*f)(float))
+    {
+        PutTag("BMAT");
+        PutString(name);
+        size_t numRows = m->GetNumRows();
+        size_t numCols = m->GetNumCols();
+
+        if (maxelem == SIZE_MAX)
+        {
+            PutInt(numRows);
+            PutInt(numCols);
+        }
+        else    // this allows to shorten a vector, as we need for mean/invstd
+        {
+            PutInt(maxelem);
+            PutInt(1);
+        }
+
+        // this code transposes the matrix on the fly, and outputs at most maxelem floating point numbers to the stream
+        size_t k = 0;
+        for (size_t j = 0; j < numCols && k < maxelem; j++)
+            for (size_t i = 0; i < numRows && k < maxelem; i++, k++)
+                fstream << f((float)(*m)(i, j));
+
+        PutTag("EMAT");
+    };
+    auto PutMatrix = [&](const Matrix<ElemType> * m, const char * name) { PutMatrixConverted(m, SIZE_MAX, name, [](float v) { return v; }); };
+
+    // write out the data
+    // Dump DBN header
+    PutString("DBN");
+    PutTag("BDBN");
+    PutInt(0);                                                                              // a version number
+    PutInt(static_cast<int>(dbnLayers.size()));                                             // number of layers
+
+    // Dump feature norm
+    PutMatrixConverted(&meanNodeMatrix, meanNodeMatrix.GetNumRows() / ctx, "gmean", [](float v) { return v; });
+    PutMatrixConverted(&invStdNodeMatrix, invStdNodeMatrix.GetNumRows() / ctx, "gstddev", [](float v) { return v; });
+
+    PutTag("BNET");
+    auto lastOne = dbnLayers.end();
+    --lastOne;
+    for (auto ii = dbnLayers.begin(), e = dbnLayers.end(); ii != e; ++ii)
+    {
+        DbnLayerPtr& layer = *ii;
+
+        if (ii == dbnLayers.begin())
+        {
+            PutString("rbmgaussbernoulli");
+        }
+        else if (ii == lastOne)
+        {
+            PutString("perceptron");
+        }
+        else if (layer->Sigmoided)
+        {
+            PutString("rbmbernoullibernoulli");
+        }
+        else
+        {
+            PutString("rbmisalinearbernoulli");
+        }
+
+        // Write out the main weight matrix
+        auto weight = (layer->Node->As<ComputationNode<ElemType>>()->Value().DeepClone());
+        auto transpose = weight.Transpose();
+        PutMatrix(&transpose, "W");
+
+        // Write out biasing vector
+        // Is mandatory, so pack with zeroes if not given
+        auto rows = layer->Node->GetAsMatrixNumRows();
+        if (layer->Bias == nullptr)
+        {
+            auto zeros = Matrix<ElemType>::Zeros(rows, 1, CPUDEVICE);
+            PutMatrixConverted(&zeros, rows, "a", [](float v) { return v; });
+        }
+        else
+        {
+            PutMatrixConverted(&(layer->Bias->As<ComputationNode<ElemType>>()->Value()), rows, "a", [](float v) { return v; });
+        }
+
+        // Some sort of legacy vector that is useless
+        auto zeros = Matrix<ElemType>::Zeros(0, 0, CPUDEVICE);
+        PutMatrix(&(zeros), "b");
+    }
+
+    // Dump the priors
+    PutTag("ENET");
+    if (priorNodes.size() > 0)
+    {
+        PutMatrix(&(priorNodes.front()->As<ComputationNode<ElemType>>()->Value()), "Pu");
+    }
+    else
+    {
+        Warning("No priority node(s) found!");
+    }
+    PutTag("EDBN");
+}
+
 template void ComputationNetwork::InitLearnableParameters<float>(const ComputationNodeBasePtr& node, const bool uniformInit, const unsigned long randomSeed, const float initValueScale, bool initOnCPUOnly);
-template void ComputationNetwork::Read<float>(const wstring& fileName, const FileOptions fileFormat, const bool bAllowNoCriterionNode, ComputationNetwork* anotherNetwork);
+template void ComputationNetwork::Read<float>(const wstring& fileName);
 template void ComputationNetwork::ReadPersistableParameters<float>(File& fstream, bool create);
 template void ComputationNetwork::PerformSVDecomposition<float>(const map<wstring, float>& SVDConfig, size_t alignedsize);
 template /*static*/ void ComputationNetwork::SetDropoutRate<float>(ComputationNetworkPtr net, const ComputationNodeBasePtr& criterionNode, const double dropoutRate, double& prevDropoutRate, unsigned long& dropOutSeed);
+template /*static*/ void ComputationNetwork::SetBatchNormalizationTimeConstant<float>(ComputationNetworkPtr net, const ComputationNodeBasePtr& criterionNode, const double normalizationTimeConstant, double& prevNormalizationTimeConstant);
 template void ComputationNetwork::SetSeqParam<float>(ComputationNetworkPtr net, const ComputationNodeBasePtr criterionNode, const double& hsmoothingWeight, const double& frameDropThresh, const bool& doreferencealign,
                                                      const double& amf, const double& lmf, const double& wp, const double& bMMIfactor, const bool& sMBR);
+template void ComputationNetwork::SaveToDbnFile<float>(ComputationNetworkPtr net, const std::wstring& fileName) const;
 
 template void ComputationNetwork::InitLearnableParameters<double>(const ComputationNodeBasePtr& node, const bool uniformInit, const unsigned long randomSeed, const double initValueScale, bool initOnCPUOnly);
-template void ComputationNetwork::Read<double>(const wstring& fileName, const FileOptions fileFormat, const bool bAllowNoCriterionNode, ComputationNetwork* anotherNetwork);
+template void ComputationNetwork::Read<double>(const wstring& fileName);
 template void ComputationNetwork::ReadPersistableParameters<double>(File& fstream, bool create);
 template void ComputationNetwork::PerformSVDecomposition<double>(const map<wstring, float>& SVDConfig, size_t alignedsize);
 template /*static*/ void ComputationNetwork::SetDropoutRate<double>(ComputationNetworkPtr net, const ComputationNodeBasePtr& criterionNode, const double dropoutRate, double& prevDropoutRate, unsigned long& dropOutSeed);
+template /*static*/ void ComputationNetwork::SetBatchNormalizationTimeConstant<double>(ComputationNetworkPtr net, const ComputationNodeBasePtr& criterionNode, const double normalizationTimeConstant, double& prevNormalizationTimeConstant);
 template void ComputationNetwork::SetSeqParam<double>(ComputationNetworkPtr net, const ComputationNodeBasePtr criterionNode, const double& hsmoothingWeight, const double& frameDropThresh, const bool& doreferencealign,
                                                       const double& amf, const double& lmf, const double& wp, const double& bMMIfactor, const bool& sMBR);
+template void ComputationNetwork::SaveToDbnFile<double>(ComputationNetworkPtr net, const std::wstring& fileName) const;
 
 // register ComputationNetwork with the ScriptableObject system
 ScriptableObjects::ConfigurableRuntimeTypeRegister::Add<ComputationNetwork> registerComputationNetwork(L"ComputationNetwork");
-} } }
+
+}}}

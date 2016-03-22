@@ -197,11 +197,11 @@ void DSSMReader<ElemType>::InitFromConfig(const ConfigRecordType& readerConfig)
     }
 
     std::string minibatchMode(readerConfig(L"minibatchMode", "Partial"));
-    m_partialMinibatch = !_stricmp(minibatchMode.c_str(), "Partial");
+    m_partialMinibatch = EqualCI(minibatchMode, "Partial");
 
     // Get the config parameters for query feature and doc feature
     ConfigParameters configFeaturesQuery = readerConfig(m_featuresNameQuery, "");
-    ConfigParameters configFeaturesDoc = readerConfig(m_featuresNameDoc, "");
+    ConfigParameters configFeaturesDoc   = readerConfig(m_featuresNameDoc, "");
 
     if (configFeaturesQuery.size() == 0)
         RuntimeError("features file not found, required in configuration: i.e. 'features=[file=c:\\myfile.txt;start=1;dim=123]'");
@@ -211,7 +211,7 @@ void DSSMReader<ElemType>::InitFromConfig(const ConfigRecordType& readerConfig)
     // Read in feature size information
     // This information will be used to handle OOVs
     m_featuresDimQuery = configFeaturesQuery(L"dim");
-    m_featuresDimDoc = configFeaturesDoc(L"dim");
+    m_featuresDimDoc   = configFeaturesDoc(L"dim");
 
     std::wstring fileQ = configFeaturesQuery("file");
     std::wstring fileD = configFeaturesDoc("file");
@@ -320,7 +320,7 @@ void DSSMReader<ElemType>::StoreLabel(ElemType& labelStore, const LabelType& lab
 //             [out] each matrix resized if necessary containing data.
 // returns - true if there are more minibatches, false if no more minibatchs remain
 template <class ElemType>
-bool DSSMReader<ElemType>::GetMinibatch(std::map<std::wstring, Matrix<ElemType>*>& matrices)
+bool DSSMReader<ElemType>::GetMinibatch(StreamMinibatchInputs& matrices)
 {
     if (m_readNextSample >= m_totalSamples)
     {
@@ -329,9 +329,9 @@ bool DSSMReader<ElemType>::GetMinibatch(std::map<std::wstring, Matrix<ElemType>*
     // In my unit test example, the input matrices contain 5: N, S, fD, fQ and labels
     // Both N and S serve as a pre-set constant values, no need to change them
     // In this node, we only need to fill in these matrices: fD, fQ, labels
-    Matrix<ElemType>& featuresQ = *matrices[m_featuresNameQuery];
-    Matrix<ElemType>& featuresD = *matrices[m_featuresNameDoc];
-    Matrix<ElemType>& labels = *matrices[m_labelsName]; // will change this part later.
+    Matrix<ElemType>& featuresQ = matrices.GetInputMatrix<ElemType>(m_featuresNameQuery);
+    Matrix<ElemType>& featuresD = matrices.GetInputMatrix<ElemType>(m_featuresNameDoc);
+    Matrix<ElemType>& labels    = matrices.GetInputMatrix<ElemType>(m_labelsName); // will change this part later.  TODO: How?
 
     size_t actualMBSize = (m_readNextSample + m_mbSize > m_totalSamples) ? m_totalSamples - m_readNextSample : m_mbSize;
 
@@ -418,7 +418,7 @@ bool DSSMReader<ElemType>::GetMinibatch(std::map<std::wstring, Matrix<ElemType>*
 // GetLabelMapping - Gets the label mapping from integer index to label type
 // returns - a map from numeric datatype to native label type
 template <class ElemType>
-const std::map<typename IDataReader<ElemType>::LabelIdType, typename IDataReader<ElemType>::LabelType>& DSSMReader<ElemType>::GetLabelMapping(const std::wstring& sectionName)
+const std::map<IDataReader::LabelIdType, IDataReader::LabelType>& DSSMReader<ElemType>::GetLabelMapping(const std::wstring& sectionName)
 {
     if (m_cachingReader)
     {
@@ -431,7 +431,7 @@ const std::map<typename IDataReader<ElemType>::LabelIdType, typename IDataReader
 // labelMapping - mapping table from label values to IDs (must be 0-n)
 // note: for tasks with labels, the mapping table must be the same between a training run and a testing run
 template <class ElemType>
-void DSSMReader<ElemType>::SetLabelMapping(const std::wstring& /*sectionName*/, const std::map<typename IDataReader<ElemType>::LabelIdType, typename LabelType>& labelMapping)
+void DSSMReader<ElemType>::SetLabelMapping(const std::wstring& /*sectionName*/, const std::map<LabelIdType, LabelType>& labelMapping)
 {
     if (m_cachingReader)
     {
@@ -446,27 +446,7 @@ void DSSMReader<ElemType>::SetLabelMapping(const std::wstring& /*sectionName*/, 
 }
 
 template <class ElemType>
-bool DSSMReader<ElemType>::DataEnd(EndDataType endDataType)
-{
-    bool ret = false;
-    switch (endDataType)
-    {
-    case endDataNull:
-        assert(false);
-        break;
-    case endDataEpoch:
-        // ret = (m_mbStartSample / m_epochSize < m_epoch);
-        ret = (m_readNextSample >= m_totalSamples);
-        break;
-    case endDataSet:
-        ret = (m_readNextSample >= m_totalSamples);
-        break;
-    case endDataSentence: // for fast reader each minibatch is considered a "sentence", so always true
-        ret = true;
-        break;
-    }
-    return ret;
-}
+bool DSSMReader<ElemType>::DataEnd() { return true; }
 
 template <class ElemType>
 DSSM_BinaryInput<ElemType>::DSSM_BinaryInput()

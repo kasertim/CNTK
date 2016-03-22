@@ -9,7 +9,6 @@
 #include "Helpers.h"
 #include "CommonMatrix.h"
 #include "TensorShape.h" // only for SmallVector; I was hoping to keep this out
-#include "DebugUtil.h"
 #include "BestGpu.h" // for CPUONLY macro
 #include "ConcStack.h"
 #include <string>
@@ -19,6 +18,10 @@
 #include <iostream> // for cout/cerr
 #include <memory>   // for unique_ptr
 #include <limits.h> // for ULONG_MAX
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 // predeclare cublasHandle_t
 struct cublasContext;
@@ -100,7 +103,6 @@ public:
     static const int MaxGpus = 8; // support up to 8 GPUs
     using BaseMatrix<ElemType>::m_computeDevice;
     using BaseMatrix<ElemType>::m_elemSizeAllocated;
-    using BaseMatrix<ElemType>::m_matrixName;
     using BaseMatrix<ElemType>::m_format;
     using BaseMatrix<ElemType>::m_externalBuffer;
     using BaseMatrix<ElemType>::m_nz;
@@ -110,7 +112,7 @@ public:
     using BaseMatrix<ElemType>::GetArray;
     using BaseMatrix<ElemType>::GetNumRows;
     using BaseMatrix<ElemType>::GetNumCols;
-    using BaseMatrix<ElemType>::SetMatrixName;
+    using BaseMatrix<ElemType>::VerifySize;
 
 private:
     static cublasHandle_t s_cuHandle[MaxGpus];
@@ -135,8 +137,7 @@ private:
     void ReleaseWorkspace(std::unique_ptr<GPUMatrix<ElemType>> src) const;
 
 public:
-    GPUMatrix(int deviceId);
-    GPUMatrix(FILE* f, const char* matrixName, int deviceId);
+    explicit GPUMatrix(int deviceId);
     GPUMatrix(const size_t numRows, const size_t numCols, int deviceId);
     GPUMatrix(const size_t numRows, const size_t numCols, int deviceId, ElemType* pArray, const size_t matrixFlags = matrixFlagNormal);
     GPUMatrix(const GPUMatrix<ElemType>& deepCopyFrom);
@@ -146,7 +147,6 @@ public:
     ~GPUMatrix(void);
 
     static void SetDevice(DEVICEID_TYPE deviceId);
-    static DEVICEID_TYPE GetBestGPUDeviceId();
     int GetComputeDeviceId() const;
     DEVICEID_TYPE PrepareDevice(DEVICEID_TYPE deviceId = -1) const;
 
@@ -210,6 +210,9 @@ public:
 
     GPUMatrix<ElemType> Transpose() const;
     GPUMatrix<ElemType>& AssignTransposeOf(const GPUMatrix<ElemType>& a);
+
+    GPUMatrix<ElemType>& DoGatherColumnsOf (ElemType beta, const GPUMatrix<ElemType>& m, const GPUMatrix<ElemType>& a, ElemType alpha);
+    GPUMatrix<ElemType>& DoScatterColumnsOf(ElemType beta, const GPUMatrix<ElemType>& m, const GPUMatrix<ElemType>& a, ElemType alpha);
 
     GPUMatrix<ElemType>& operator+=(const ElemType alpha);
     GPUMatrix<ElemType> operator+(const ElemType alpha) const;
@@ -370,9 +373,6 @@ public:
     void Print(const char* matrixName, size_t rowStart, size_t rowEnd, size_t colStart, size_t colEnd) const;
     void Print(const char* matrixName = NULL) const; // print whole matrix. can be expensive
 
-    void ReadFromFile(FILE* f, const char* matrixName); // matrixName is used to verify that correct matrix is read.
-    void WriteToFile(FILE* f, const char* matrixName);  // matrixName is used to verify that correct matrix is read.
-
     GPUMatrix<ElemType>& AssignPackedConvolutionInput(const GPUMatrix<ElemType>& inputSubBatch,
                                                       const size_t inputWidth, const size_t inputHeight, const size_t inputChannels,
                                                       const size_t outputWidth, const size_t outputHeight, const size_t outputChannels,
@@ -489,19 +489,16 @@ public:
         stream >> elsize;
         if (sizeof(ElemType) != elsize)
             LogicError("Template argument size doesn't match those in file");
-        std::wstring matrixName;
+        std::wstring matrixNameDummy; // Note this is not used anymore, just a dummy for compatability.
         size_t numRows, numCols;
         int format;
-        stream >> matrixName >> format >> numRows >> numCols;
+        stream >> matrixNameDummy >> format >> numRows >> numCols;
         ElemType* d_array = new ElemType[numRows * numCols];
         for (size_t i = 0; i < numRows * numCols; ++i)
             stream >> d_array[i];
         stream.GetMarker(fileMarkerEndSection, std::wstring(L"EMAT"));
         us.SetValue(numRows, numCols, us.GetComputeDeviceId(), d_array, matrixFlagNormal | format);
         delete[] d_array;
-        us.m_matrixName = new wchar_t[matrixName.length() + 1];
-        wmemcpy(us.m_matrixName, matrixName.c_str(), matrixName.length() + 1);
-        // us.m_matrixName = matrixName;
         return stream;
     }
     friend File& operator<<(File& stream, const GPUMatrix<ElemType>& us)
@@ -509,7 +506,8 @@ public:
         stream.PutMarker(fileMarkerBeginSection, std::wstring(L"BMAT"));
         stream << sizeof(ElemType);
 
-        std::wstring s = (us.m_matrixName == NULL) ? std::wstring(L"unnamed") : std::wstring(us.m_matrixName);
+        // TODO: This is now ignored on input, so we can should change to an empty string. This might break parsing, and must be tested first
+        std::wstring s = std::wstring(L"unnamed");
         int format = us.m_format;
         stream << s << format;
 
@@ -517,18 +515,26 @@ public:
         ElemType* pArray = us.CopyToArray();
         for (size_t i = 0; i < us.GetNumElements(); ++i)
             stream << pArray[i];
+        
         delete[] pArray;
+
         stream.PutMarker(fileMarkerEndSection, std::wstring(L"EMAT"));
         return stream;
     }
 };
 
 typedef GPUMatrix<float> GPUSingleMatrix;
-}
-}
-}
 
+}}}
+
+#ifndef CPUONLY
+
+#include <cuda_runtime.h>
+
+// -----------------------------------------------------------------------
 // Error handling
+// -----------------------------------------------------------------------
+
 template <typename ERRTYPE>
 const char* CudaErrString(ERRTYPE x); // actual error function is defined inside .cu files
 template <typename ERRTYPE>
@@ -538,8 +544,16 @@ static void CudaCall(ERRTYPE retCode, const char* exprString, const char* libNam
     {
         try
         {
-            const char* hostname = getenv("COMPUTERNAME"); // TODO: This is the easy way for Windows; likely different on Linux.
-            Microsoft::MSR::CNTK::RuntimeError("%s failure %d: %s ; GPU=%d ; hostname=%s ; expr=%s", libName, (int) retCode, CudaErrString(retCode), Microsoft::MSR::CNTK::GPUMatrix<float>::GetBestGPUDeviceId(), hostname ? hostname : "?", exprString);
+#ifdef _WIN32
+            const char* hostname = getenv("COMPUTERNAME");
+#else
+            char hostname[HOST_NAME_MAX];
+            if (gethostname(hostname, HOST_NAME_MAX) != 0)
+                strcpy(hostname, "?");
+#endif
+            int currentCudaDevice;
+            cudaGetDevice(&currentCudaDevice);
+            Microsoft::MSR::CNTK::RuntimeError("%s failure %d: %s ; GPU=%d ; hostname=%s ; expr=%s", libName, (int)retCode, CudaErrString(retCode), currentCudaDevice, hostname ? hostname : "?", exprString);
         }
         catch (const std::exception& e) // catch, log, and rethrow since CUDA code sometimes hangs in destruction, so we'd never get to see the error
         {
@@ -549,8 +563,54 @@ static void CudaCall(ERRTYPE retCode, const char* exprString, const char* libNam
     }
 }
 
-#define CUDA_CALL(expr) (CudaCall((expr), #expr, "CUDA", cudaSuccess))
-#define CUBLAS_CALL(expr) (CudaCall((expr), #expr, "CUBLAS", CUBLAS_STATUS_SUCCESS))
+#define CUDA_CALL(expr)     (CudaCall((expr), #expr, "CUDA",     cudaSuccess))
+#define CUBLAS_CALL(expr)   (CudaCall((expr), #expr, "CUBLAS",   CUBLAS_STATUS_SUCCESS))
 #define CUSPARSE_CALL(expr) (CudaCall((expr), #expr, "CUSPARSE", CUSPARSE_STATUS_SUCCESS))
-#define CURAND_CALL(expr) (CudaCall((expr), #expr, "CURAND", CURAND_STATUS_SUCCESS))
-#define CUDNN_CALL(expr) (CudaCall((expr), #expr, "cuDNN", CUDNN_STATUS_SUCCESS))
+#define CURAND_CALL(expr)   (CudaCall((expr), #expr, "CURAND",   CURAND_STATUS_SUCCESS))
+#define CUDNN_CALL(expr)    (CudaCall((expr), #expr, "cuDNN",    CUDNN_STATUS_SUCCESS))
+
+// -----------------------------------------------------------------------
+// SyncGuard -- synchronize around CUDA calls
+// -----------------------------------------------------------------------
+
+class SyncGuard
+{
+    static bool DoSync()
+    {
+#ifdef NO_SYNC // this strange way of writing it allows modifying this variable at runtime in the debugger
+        static bool do_sync = false;
+#else
+        static bool do_sync = true;
+#endif
+        return do_sync;
+    }
+    cudaEvent_t m_done;
+public:
+    SyncGuard()
+    {
+        m_done = nullptr;
+        if (DoSync())
+            CUDA_CALL(cudaEventCreate(&m_done));
+    }
+    ~SyncGuard()
+    {
+        if (DoSync())
+        {
+            // The regular use of this destructor is to synchronize the GPU, but also
+            // to check for errors. So this destructor is where CUDA errors would be thrown.
+            // If this destructor runs during stack unwinding, then a different error has
+            // already happened that should be reported; so we only clean up the resource.
+            if (std::uncaught_exception())
+                cudaEventDestroy(m_done);
+            else
+            {
+                // failures in a prior launch might be reported here
+                CUDA_CALL(cudaEventRecord(m_done));
+                CUDA_CALL(cudaEventSynchronize(m_done));
+                CUDA_CALL(cudaEventDestroy(m_done));
+            }
+        }
+    }
+};
+
+#endif // CPUONLY

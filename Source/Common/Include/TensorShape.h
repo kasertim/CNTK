@@ -74,7 +74,7 @@ namespace Microsoft { namespace MSR { namespace CNTK {
 //     - allows output and input tensors (TimesNode will get optional parameter how many leading dims to not contract), e.g.
 //       A[U,V,I,J] * B[I,J,S,T] -> C[U,V,S,T], c_uvst = sum_ij a_uvij * b_ijst
 //     - for now this operation must be flattenable as to be implementable as SGEMM (may extend in the future)
-//  - tensor transpose -> TransposeNode
+//  - tensor transpose -> TransposeDimensionsNode
 //     - swaps any two dimensions. This does not change the column-major definition, i.e. requires a memory copy.
 //     - special case: swapping between sample and MBLayout, e.g. turn a sample dimension to a time dimension
 //  - Validate() stage will automatically infer tensor dimensions from inputs, and also infer downwards into LearnableParameters where requested
@@ -351,26 +351,11 @@ public:
     }
 
     // convenience constructors, e,g. for test code
-    explicit TensorShape(size_t I)
-        : TensorShape(SmallVector<size_t>{I})
-    {
-    }
-    TensorShape(size_t I, size_t J)
-        : TensorShape(SmallVector<size_t>{I, J})
-    {
-    }
-    TensorShape(size_t I, size_t J, size_t K)
-        : TensorShape(SmallVector<size_t>{I, J, K})
-    {
-    }
-    TensorShape(size_t I, size_t J, size_t K, size_t L)
-        : TensorShape(SmallVector<size_t>{I, J, K, L})
-    {
-    }
-    TensorShape(size_t I, size_t J, size_t K, size_t L, size_t M)
-        : TensorShape(SmallVector<size_t>{I, J, K, L, M})
-    {
-    }
+    explicit TensorShape(size_t I)                                : TensorShape(SmallVector<size_t>{I}) { }
+    TensorShape(size_t I, size_t J)                               : TensorShape(SmallVector<size_t>{I, J}) { }
+    TensorShape(size_t I, size_t J, size_t K)                     : TensorShape(SmallVector<size_t>{I, J, K}) { }
+    TensorShape(size_t I, size_t J, size_t K, size_t L)           : TensorShape(SmallVector<size_t>{I, J, K, L}) { }
+    TensorShape(size_t I, size_t J, size_t K, size_t L, size_t M) : TensorShape(SmallVector<size_t>{I, J, K, L, M}) { }
 
     // default constructor
     TensorShape()
@@ -379,14 +364,8 @@ public:
     }
 
     // boilerplate
-    bool operator==(const TensorShape& other) const
-    {
-        return m_dims == other.m_dims;
-    }
-    bool operator!=(const TensorShape& other) const
-    {
-        return !operator==(other);
-    } // duh!
+    bool operator==(const TensorShape& other) const { return m_dims == other.m_dims; }
+    bool operator!=(const TensorShape& other) const { return !operator==(other); } // duh!
 
     // verify that this refers to a dense matrix (no strides)
     void VerifyIsDense() const
@@ -501,6 +480,22 @@ public:
         return (size_t) location;
     }
 
+    // get begin and end location (first offset after last element), for validation purposes
+    pair<ptrdiff_t, ptrdiff_t> GetLocationRange() const
+    {
+        auto result = make_pair(m_offset, m_offset);
+        for (size_t k = 0; k < size(); k++)
+        {
+            ptrdiff_t step = (ptrdiff_t)(m_dims[k] - 1) * m_strides[k];
+            if (m_strides[k] > 0) // strides may be negative
+                result.second += step;
+            else
+                result.first += step;
+        }
+        result.second++;    // max --> end
+        return result;
+    }
+
     // helpers for tensor operations
     bool CanFlatten(size_t k) const // can dims k and k-1 be flattened into a single vector? (do they form a matrix without stride)
     {
@@ -508,14 +503,14 @@ public:
             LogicError("CanFlatten() must not be called for index [0].");
         else if (k >= size()) // it's OK to test bottom-lessly expanded dimensions
             return true;
-        if (m_dims[k] == 1 || m_dims[k - 1] == 1) // both are broadcasting or scalar--we don't care about stride in this case
+        if (m_dims[k] == 1 && m_dims[k - 1] == 1) // both are broadcasting or scalar--we don't care about stride in this case
             return true;
         else
             return m_strides[k] == m_strides[k - 1] * (ptrdiff_t) m_dims[k - 1];
     }
     // editing functions for tensor operations
     // Unlike other methods, these are in-place.
-    TensorShape& FlattenInPlace(size_t k) // flatten [k] with [k-1]
+    TensorShape& FlattenInPlace(size_t k) // flatten [k] with [k-1]. Dim[k-1] will be absorbed into [k] and set to 1.
     {
         if (!CanFlatten(k))
             LogicError("Flatten() cannot flatten dimensions with gaps");
@@ -529,7 +524,7 @@ public:
         // TODO: rethink whether this is correct for example of negative strides
         m_dims[k] *= m_dims[k - 1];
         m_dims[k - 1] = 1;
-        m_strides[k] = /*m_dims[k - 1] *, it's 1 */ m_strides[k - 1];
+        m_strides[k] = m_strides[k - 1];
         return *this;
     }
     TensorShape& DropDimsInPlace(const SmallVector<bool>& toDrop) // remove dimension
@@ -626,6 +621,15 @@ public:
         for (size_t k = 0; k < size(); k++)
             NarrowTo(k, (size_t)bounds.first[k], (size_t)bounds.second[k]);
         return *this;
+    }
+    // swap two existing dimensions (implements transposition)
+    // This yields the same tensor but index positions are exchanged.
+    void SwapDimsInPlace(size_t i, size_t j)
+    {
+        if (i == j) // this is OK
+            return;
+        std::swap(m_dims[i],    m_dims[j]);
+        std::swap(m_strides[i], m_strides[j]);
     }
 
     // compare two TensorShapes, whether they are compatible, considering padding and broadcasting
@@ -738,7 +742,7 @@ static inline ImageLayoutKind ImageLayoutKindFrom(const wstring& s)
 }
 
 // interpret TensorShape as an image descriptor
-// considering that we support two ways of storingimages
+// considering that we support two ways of storing images
 struct ImageDimensions
 {
     size_t m_width, m_height, m_numChannels;
@@ -781,4 +785,5 @@ struct ImageDimensions
         return AsTensorShape(m_width, m_height, m_numChannels, imageLayoutKind);
     }
 };
-} } }
+
+}}}

@@ -34,8 +34,7 @@ GPUSPARSE_INDEX_TYPE GPUSparseMatrix<ElemType>::SecondaryIndexValueAt(size_t idx
 #pragma region Constructors and Destructor
 
 template <class ElemType>
-GPUSparseMatrix<ElemType>::GPUSparseMatrix(const MatrixFormat matrixFormat /*= MatrixFormat::matrixFormatSparseCSR*/,
-                                           const DEVICEID_TYPE computeDevice /*= AUTOPLACEMATRIX*/)
+GPUSparseMatrix<ElemType>::GPUSparseMatrix(DEVICEID_TYPE computeDevice, const MatrixFormat matrixFormat /*= MatrixFormat::matrixFormatSparseCSR*/)
 {
 }
 
@@ -55,7 +54,7 @@ GPUSparseMatrix<ElemType>::GPUSparseMatrix(const GPUSparseMatrix<ElemType>& deep
 }
 
 template <class ElemType>
-GPUSparseMatrix<ElemType>::GPUSparseMatrix(const size_t numRows, const size_t numCols, const size_t numNZ, const MatrixFormat matrixFormat /*= MatrixFormat::matrixFormatSparseCSR*/, const DEVICEID_TYPE computeDevice /*= AUTOPLACEMATRIX*/)
+GPUSparseMatrix<ElemType>::GPUSparseMatrix(const size_t numRows, const size_t numCols, const size_t numNZ, DEVICEID_TYPE computeDevice, const MatrixFormat matrixFormat /*= MatrixFormat::matrixFormatSparseCSR*/)
 {
 }
 
@@ -214,14 +213,6 @@ ElemType GPUSparseMatrix<ElemType>::Adagrad(GPUMatrix<ElemType>& c, const bool n
 }
 //template<class ElemType>
 //void GPUSparseMatrix<ElemType>::FSAdagrad(CPUMatrix<ElemType>& gradients, CPUMatrix<ElemType>&, ElemType, ElemType, ElemType, ElemType) { }
-
-#ifdef NO_SYNC
-template <class ElemType>
-bool GPUSparseMatrix<ElemType>::do_sync = false;
-#else
-template <class ElemType>
-bool GPUSparseMatrix<ElemType>::do_sync = true;
-#endif
 
 template <class ElemType>
 void GPUSparseMatrix<ElemType>::MultiplyAndWeightedAdd(ElemType alpha, const GPUSparseMatrix<ElemType>& a, const bool transposeA,
@@ -430,7 +421,7 @@ void GPUSparseMatrix<ElemType>::InplaceTranspose()
 template <class ElemType>
 GPUSparseMatrix<ElemType> GPUSparseMatrix<ElemType>::ColumnSlice(size_t startColumn, size_t numCols) const
 {
-    GPUSparseMatrix<ElemType> a;
+    GPUSparseMatrix<ElemType> a(0);
     return a;
 }
 template <class ElemType>
@@ -735,14 +726,6 @@ DeviceBoundNumber<ElemType>::~DeviceBoundNumber()
 template <class ElemType>
 void GPUMatrix<ElemType>::SetDevice(DEVICEID_TYPE deviceId){};
 
-// GetBestGPUDeviceId - Get the best GPU DeviceId, based on cuda information
-//  TODO: should be replaced by BestGpu class instead, it's much better
-template <class ElemType>
-int GPUMatrix<ElemType>::GetBestGPUDeviceId() // returns -1 if no GPUs can be used
-{
-    return EnforceOneGPUOnly(-1); // CPU
-}
-
 // PrepareDevice - Setup the correct cuda context for an operation
 // deviceId - the device on which the operation will take place
 //            defaults to -1, which means use matrices current device
@@ -793,12 +776,6 @@ void GPUMatrix<ElemType>::ZeroInit(int deviceId)
 
 template <class ElemType>
 GPUMatrix<ElemType>::GPUMatrix(int deviceId){};
-
-//matrixName is used to verify that correct matrix is read.
-template <class ElemType>
-GPUMatrix<ElemType>::GPUMatrix(FILE* f, const char* matrixName, int deviceId)
-{
-}
 
 template <class ElemType>
 GPUMatrix<ElemType>::GPUMatrix(const size_t numRows, const size_t numCols, int deviceId){};
@@ -940,6 +917,18 @@ cublasHandle_t GPUMatrix<ElemType>::GetCublasHandle(int computeDevice /*=-1*/)
 
 template <class ElemType>
 GPUMatrix<ElemType>& GPUMatrix<ElemType>::AssignTransposeOf(const GPUMatrix<ElemType>& /*a*/)
+{
+    return *this;
+}
+
+template <class ElemType>
+GPUMatrix<ElemType>& GPUMatrix<ElemType>::DoGatherColumnsOf(ElemType beta, const GPUMatrix<ElemType>& m, const GPUMatrix<ElemType>& a, ElemType alpha)
+{
+    return *this;
+}
+
+template <class ElemType>
+GPUMatrix<ElemType>& GPUMatrix<ElemType>::DoScatterColumnsOf(ElemType beta, const GPUMatrix<ElemType>& m, const GPUMatrix<ElemType>& a, ElemType alpha)
 {
     return *this;
 }
@@ -1679,19 +1668,6 @@ void GPUMatrix<ElemType>::Print(const char* matrixName /*=nullptr*/) const
 {
 }
 
-// file I/O
-//matrixName is used to verify that correct matrix is read.
-template <class ElemType>
-void GPUMatrix<ElemType>::ReadFromFile(FILE* f, const char* matrixName)
-{
-}
-
-//matrixName is used to verify that correct matrix is read.
-template <class ElemType>
-void GPUMatrix<ElemType>::WriteToFile(FILE* f, const char* matrixName)
-{
-}
-
 //helpfer function used for convolution neural network
 template <class ElemType>
 GPUMatrix<ElemType>& GPUMatrix<ElemType>::AssignPackedConvolutionInput(const GPUMatrix<ElemType>& inputSubBatch,
@@ -2145,33 +2121,33 @@ typename CuDnnConvolutionEngineFactory<ElemType>::Tensor4DPtr CuDnnConvolutionEn
 template <class ElemType>
 typename CuDnnConvolutionEngineFactory<ElemType>::FilterPtr CuDnnConvolutionEngineFactory<ElemType>::CreateFilter(size_t, size_t, size_t, size_t)
 {
-    RuntimeError("The code is compiled without CPUONLY macro.");
+    RuntimeError("The code is compiled with CPUONLY macro.");
 }
 
 template <class ElemType>
 typename CuDnnConvolutionEngineFactory<ElemType>::ConvDescPtr CuDnnConvolutionEngineFactory<ElemType>::CreateConvDescriptor(
     const Tensor4D&, const Filter&, size_t, size_t, bool)
 {
-    RuntimeError("The code is compiled without CPUONLY macro.");
+    RuntimeError("The code is compiled with CPUONLY macro.");
 }
 
 template <class ElemType>
 typename CuDnnConvolutionEngineFactory<ElemType>::PoolDescPtr CuDnnConvolutionEngineFactory<ElemType>::CreatePoolDescriptor(
     typename PoolDesc::PoolKind, size_t, size_t, size_t, size_t, size_t, size_t)
 {
-    RuntimeError("The code is compiled without CPUONLY macro.");
+    RuntimeError("The code is compiled with CPUONLY macro.");
 }
 
 template <class ElemType>
-typename CuDnnConvolutionEngineFactory<ElemType>::ConvEnginePtr CuDnnConvolutionEngineFactory<ElemType>::CreateConvEngine(DEVICEID_TYPE, size_t)
+typename CuDnnConvolutionEngineFactory<ElemType>::ConvEnginePtr CuDnnConvolutionEngineFactory<ElemType>::CreateConvEngine(DEVICEID_TYPE, ImageLayoutKind, size_t, BatchNormImpl)
 {
-    RuntimeError("The code is compiled without CPUONLY macro.");
+    RuntimeError("The code is compiled with CPUONLY macro.");
 }
 
 template <class ElemType>
-typename CuDnnConvolutionEngineFactory<ElemType>::PoolEnginePtr CuDnnConvolutionEngineFactory<ElemType>::CreatePoolEngine(DEVICEID_TYPE)
+typename CuDnnConvolutionEngineFactory<ElemType>::PoolEnginePtr CuDnnConvolutionEngineFactory<ElemType>::CreatePoolEngine(DEVICEID_TYPE, ImageLayoutKind)
 {
-    RuntimeError("The code is compiled without CPUONLY macro.");
+    RuntimeError("The code is compiled with CPUONLY macro.");
 }
 
 template <class ElemType>
@@ -2182,9 +2158,22 @@ bool CuDnnConvolutionEngineFactory<ElemType>::IsSupported(DEVICEID_TYPE)
 
 template class CuDnnConvolutionEngineFactory<float>;
 template class CuDnnConvolutionEngineFactory<double>;
+
+CudaTimer::~CudaTimer()
+{
 }
+void CudaTimer::Start()
+{
 }
+void CudaTimer::Stop()
+{
 }
+float CudaTimer::Elapsed()
+{
+    return 0;
+}
+
+} } }
 
 // define a dummy GPUWatcher class too
 #include "GPUWatcher.h"

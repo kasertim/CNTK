@@ -834,7 +834,7 @@ status open
 
 \begin_layout Plain Layout
 
-cntk configFile=Simple.config 
+cntk configFile=Simple.cntk 
 \end_layout
 
 \end_inset
@@ -853,7 +853,7 @@ status open
 
 \begin_layout Plain Layout
 
-cntk configFile=Simple.config 
+cntk configFile=Simple.cntk 
 \end_layout
 
 \end_inset
@@ -1088,7 +1088,7 @@ Input: The number of input nodes in the network divided by the dimensionality
 
 \begin_layout Description
 Output: The TIMIT data is labeled with 61 different phonemes, and the network
- is trained to recognize tri-phones.
+ is trained to recognize monophone states.
  Thus there are 61x3=183 output nodes.
 \end_layout
 

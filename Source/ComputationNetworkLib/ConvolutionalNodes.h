@@ -121,7 +121,7 @@ public:
         fstream >> outputChannels >> imageLayoutKind;
         m_imageLayoutKind = (ImageLayoutKind) imageLayoutKind;
         m_outputChannels = outputChannels;
-        SetDims(ImageDimensions::AsTensorShape(1, 1, m_outputChannels, m_imageLayoutKind), 0); // TODO: needed?
+        SetDims(ImageDimensions::AsTensorShape(1, 1, m_outputChannels, m_imageLayoutKind), HasMBLayout()); // TODO: needed?
         fstream >> m_zeroPadding >> m_maxTempMemSizeInSamples;
         m_factory = ConvolutionEngineFactory<ElemType>::Create(GetDeviceId(), ConvolutionEngineFactory<ElemType>::EngineType::Auto, m_imageLayoutKind);
     }
@@ -144,7 +144,7 @@ public:
 
             node->m_imageLayoutKind = m_imageLayoutKind;
 
-            *node->m_tempMatrix = *m_tempMatrix;
+            node->m_tempMatrix->SetValue(*m_tempMatrix);
         }
     }
 
@@ -198,20 +198,6 @@ public:
 #endif
     }
 
-    // BUGBUG: Should not be here. Use PlusNode and m_sampleLayout.  TODO: Bad naming:'output' is actually an 'input'
-    void AddBias(const Matrix<ElemType>& output, const Matrix<ElemType>& bias, Matrix<ElemType>& dst)
-    {
-        assert(m_convEng != nullptr);
-        m_convEng->AddBias(*m_outT, output, *m_biasT, bias, dst);
-    }
-
-    void BackwardBias(const Matrix<ElemType>& srcGrad, Matrix<ElemType>& biasGrad)
-    {
-        assert(m_convEng != nullptr);
-        m_convEng->BackwardBias(*m_outT, srcGrad, *m_biasT, biasGrad);
-    }
-
-    // note: this also infers dimensions from chilren
     void /*ComputationNodeBase::*/ Validate(bool isFinalValidationPass) override
     {
         Base::Validate(isFinalValidationPass);
@@ -224,11 +210,11 @@ public:
             InvalidArgument("%ls %ls operation requires that input width be >= kernelWidth and input height >= kernelHeight.", NodeName().c_str(), OperationName().c_str());
 
         // determine output tensor shape
-        const int kernelWidthCenter = m_zeroPadding ? m_kernelWidth % 2 : m_kernelWidth;
+        const int kernelWidthCenter  = m_zeroPadding ? m_kernelWidth  % 2 : m_kernelWidth;
         const int kernelHeightCenter = m_zeroPadding ? m_kernelHeight % 2 : m_kernelHeight;
         auto outDims = ImageDimensions(
-            (inDims.m_width - kernelWidthCenter) / m_horizontalSubsample + 1,
-            (inDims.m_height - kernelHeightCenter) / m_verticalSubsample + 1,
+            (inDims.m_width  - kernelWidthCenter)  / m_horizontalSubsample + 1,
+            (inDims.m_height - kernelHeightCenter) / m_verticalSubsample   + 1,
             m_outputChannels);
 
         size_t weightCols = m_kernelWidth * m_kernelHeight * inDims.m_numChannels;
@@ -253,7 +239,7 @@ public:
             // TODO: This seems to expose too much internal knowlegde of the engine to the ConvolutionNode().
             //       Why not just pass everything to the engine creator, and get one object that holds everything.
             if (m_convEng == nullptr)
-                m_convEng = m_factory->CreateConvEngine(m_deviceId, m_maxTempMemSizeInSamples);
+                m_convEng = m_factory->CreateConvEngine(m_deviceId, m_imageLayoutKind, m_maxTempMemSizeInSamples, BatchNormImpl::Cntk);
             if (m_inT == nullptr)
                 m_inT = m_factory->CreateTensor(inDims.m_width, inDims.m_height, inDims.m_numChannels, 1);
             if (m_filterT == nullptr)
@@ -268,9 +254,9 @@ public:
         }
     }
 
-    void DumpNodeInfo(const bool printValues, File& fstream) const override
+    void DumpNodeInfo(const bool printValues, const bool printMetadata, File& fstream) const override
     {
-        Base::DumpNodeInfo(printValues, fstream);
+        Base::DumpNodeInfo(printValues, printMetadata, fstream);
 
         auto inDims = ImageDimensions(GetInputSampleLayout(1), m_imageLayoutKind);
         auto outDims = ImageDimensions(m_sampleLayout, m_imageLayoutKind);
@@ -463,7 +449,7 @@ public:
             // if (m_factory == nullptr)
             //    m_factory = ConvolutionEngineFactory<ElemType>::Create(m_deviceId, ConvolutionEngineFactory<ElemType>::EngineType::Auto, m_imageLayoutKind);
             if (m_poolEng == nullptr)
-                m_poolEng = m_factory->CreatePoolEngine(m_deviceId);
+                m_poolEng = m_factory->CreatePoolEngine(m_deviceId, m_imageLayoutKind);
             if (m_inT == nullptr)
                 m_inT = m_factory->CreateTensor(inDims.m_width, inDims.m_height, inDims.m_numChannels, 1);
             if (m_outT == nullptr)
@@ -471,21 +457,24 @@ public:
         }
     }
 
-    void DumpNodeInfo(const bool printValues, File& fstream) const override
+    void DumpNodeInfo(const bool printValues, const bool printMetadata, File& fstream) const override
     {
-        Base::DumpNodeInfo(printValues, fstream);
+        Base::DumpNodeInfo(printValues, printMetadata, fstream);
 
-        auto inputSampleLayout = GetInputSampleLayout(0);
+        if (printMetadata)
+        {
+            auto inputSampleLayout = GetInputSampleLayout(0);
 
-        char str[4096];
-        sprintf(str, "Input[Width:%lu, Height:%lu, Channels:%lu]  \n", inputSampleLayout[1], inputSampleLayout[2], inputSampleLayout[0]);
-        fstream << string(str);
-        sprintf(str, "PoolingWindow[Width:%lu, Height:%lu]  SubSampling[Horizontal:%lu, Vertical:%lu]\n", m_windowWidth, m_windowHeight, m_horizontalSubsample, m_verticalSubsample);
-        fstream << string(str);
-        sprintf(str, "Output[Width:%lu, Height:%lu, Channels:%lu]  \n", m_sampleLayout[1], m_sampleLayout[2], m_sampleLayout[0]);
-        fstream << string(str);
-        sprintf(str, "TotalSizePerSample[Input:%lu, Output:%lu]  \n", m_inputSizePerSample, m_outputSizePerSample);
-        fstream << string(str);
+            char str[4096];
+            sprintf(str, "Input[Width:%lu, Height:%lu, Channels:%lu]  \n", inputSampleLayout[1], inputSampleLayout[2], inputSampleLayout[0]);
+            fstream << string(str);
+            sprintf(str, "PoolingWindow[Width:%lu, Height:%lu]  SubSampling[Horizontal:%lu, Vertical:%lu]\n", m_windowWidth, m_windowHeight, m_horizontalSubsample, m_verticalSubsample);
+            fstream << string(str);
+            sprintf(str, "Output[Width:%lu, Height:%lu, Channels:%lu]  \n", m_sampleLayout[1], m_sampleLayout[2], m_sampleLayout[0]);
+            fstream << string(str);
+            sprintf(str, "TotalSizePerSample[Input:%lu, Output:%lu]  \n", m_inputSizePerSample, m_outputSizePerSample);
+            fstream << string(str);
+        }
     }
 
 protected:

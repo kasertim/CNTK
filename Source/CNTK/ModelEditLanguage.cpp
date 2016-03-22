@@ -14,6 +14,7 @@
 namespace Microsoft { namespace MSR { namespace CNTK {
 
 // EqualInsensitive - check to see if two nodes are equal up to the length of the first string (must be at least half as long as actual node name)
+// TODO: Allowing partial matches seems misguided. We should discourage that, or just remove it.
 // string1 - [in,out] string to compare, if comparision is equal insensitive but not sensitive, will replace with sensitive version
 // string2 - second string to compare
 // alternate - alternate naming of the string
@@ -50,7 +51,8 @@ bool EqualInsensitive(std::string& string1, const char* string2, const char* alt
 enum MELProperty
 {
     melPropNull,
-    melPropComputeGradient,
+    melPropParameterUpdateRequired,
+    melPropLearningRateMultiplier,
     melPropFeature,
     melPropLabel,
     melPropFinalCriterion,
@@ -264,7 +266,7 @@ void MELScript<ElemType>::CallFunction(const std::string& p_name, const ConfigPa
         {
             NetNdl<ElemType>* netNdl = &found->second;
             ProcessNDLScript(netNdl, ndlPassAll, true);
-            found->second.cn->DumpAllNodesToFile(includeData, fileName);
+            found->second.cn->DumpAllNodesToFile(includeData, true, fileName);
         }
     }
     else if (EqualInsensitive(name, "DumpNode"))
@@ -280,7 +282,7 @@ void MELScript<ElemType>::CallFunction(const std::string& p_name, const ConfigPa
         NetNdl<ElemType>* netNdl;
         vector<ComputationNodeBasePtr> nodes = FindSymbols(params[0], netNdl);
         ProcessNDLScript(netNdl, ndlPassAll);
-        netNdl->cn->DumpNodeInfoToFile(nodes, includeData, fileName);
+        netNdl->cn->DumpNodeInfoToFile(nodes, includeData, true, fileName);
     }
     else if (EqualInsensitive(name, "CopyNode", "Copy"))
     {
@@ -406,9 +408,13 @@ void MELScript<ElemType>::CallFunction(const std::string& p_name, const ConfigPa
 
         std::string propName = params[1];
         MELProperty prop = melPropNull;
-        if (EqualInsensitive(propName, "computeGradient", "needsGradient"))
+        if (EqualInsensitive(propName, "needGradient", "needsGradient") || EqualInsensitive(propName, "computeGradient"))
         {
-            prop = melPropComputeGradient;
+            prop = melPropParameterUpdateRequired;  // for backward compatibility
+        }
+        else if (EqualInsensitive(propName, "learningRateMultiplier"))
+        {
+            prop = melPropLearningRateMultiplier;
         }
         else if (EqualInsensitive(propName, "feature"))
         {
@@ -418,15 +424,15 @@ void MELScript<ElemType>::CallFunction(const std::string& p_name, const ConfigPa
         {
             prop = melPropLabel;
         }
-        else if (EqualInsensitive(propName, "finalCriterion", "criterion") || EqualInsensitive(propName, "finalCriterion", "Criteria"))
+        else if (EqualInsensitive(propName, "criterion") || /*legacy:*/EqualInsensitive(propName, "finalCriterion", "Criteria"))
         {
             prop = melPropFinalCriterion;
         }
-        else if (EqualInsensitive(propName, "multiSeq", "reqMultiSeqHandling"))
+        else if (EqualInsensitive(propName, "multiSeq", "reqMultiSeqHandling")) // legacy
         {
             fprintf(stderr, "WARNING: '%s' property is defunct and will be ignored.\n", propName.c_str());
         }
-        else if (EqualInsensitive(propName, "evaluation", "eval"))
+        else if (EqualInsensitive(propName, "evaluation", "eval")) // TODO: choose one
         {
             prop = melPropEvaluation;
         }
@@ -459,9 +465,14 @@ void MELScript<ElemType>::CallFunction(const std::string& p_name, const ConfigPa
         {
             switch (prop)
             {
-            case melPropComputeGradient:
+            case melPropParameterUpdateRequired:  // for backward compatibility
             {
-                node->SetParameterUpdateRequired(params[2]);
+                node->SetLearningRateMultiplier((bool)params[2] ? 1.0f : 0);
+                break;
+            }
+            case melPropLearningRateMultiplier:
+            {
+                node->SetLearningRateMultiplier((float)params[2]);
                 break;
             }
             case melPropFeature:
@@ -541,9 +552,14 @@ void MELScript<ElemType>::CallFunction(const std::string& p_name, const ConfigPa
 
         std::string propName = params[1];
         MELProperty prop = melPropNull;
-        if (EqualInsensitive(propName, "ComputeGradient", "NeedsGradient"))
+
+        if (EqualInsensitive(propName, "needGradient", "needsGradient") || EqualInsensitive(propName, "computeGradient"))
         {
-            prop = melPropComputeGradient;
+            prop = melPropParameterUpdateRequired;  // for backward compatability
+        }
+        else if (EqualInsensitive(propName, "learningRateMultiplier"))
+        {
+            prop = melPropLearningRateMultiplier;
         }
         else if (EqualInsensitive(propName, "batchNormEvalMode"))
         {
@@ -565,16 +581,22 @@ void MELScript<ElemType>::CallFunction(const std::string& p_name, const ConfigPa
         {
             switch (prop)
             {
-            case melPropComputeGradient:
+            case melPropParameterUpdateRequired:  //for backward compatibility
             {
-                bool needGradient = params[2];
-                netNdl->cn->SetLearnableNodesBelowNeedGradient(needGradient, node);
+                float learningRateMultiplier = (bool)params[2] ? 1.0f : 0;
+                netNdl->cn->SetLearnableNodesBelowLearningRateMultiplier(learningRateMultiplier, node);
+                break;
+            }
+            case melPropLearningRateMultiplier:
+            {
+                float learningRateMultiplier = (float)params[2];
+                netNdl->cn->SetLearnableNodesBelowLearningRateMultiplier(learningRateMultiplier, node);
                 break;
             }
             case melPropBatchNormMode:
             {
                 bool evalMode = params[2];
-                netNdl->cn->SetBatchNormlizationNodesBelowEvalMode(evalMode, node);
+                netNdl->cn->SetBatchNormalizationNodesBelowEvalMode(evalMode, node);
                 break;
             }
             default:

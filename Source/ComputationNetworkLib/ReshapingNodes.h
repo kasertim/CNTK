@@ -28,7 +28,6 @@ namespace Microsoft { namespace MSR { namespace CNTK {
 //  - just replaces metadata m_sampleLayout, does not change data values
 //  - one dimension may be specified as 0 and will be inferred
 //  - optional beginDim/endDim denote to only replace a sub-range of dims, for implementing ReshapeDimension() and FlattenRank()
-//  - may not be applied to time; use Permute() or Transpose()
 //
 // Derived operations:
 //
@@ -41,21 +40,14 @@ namespace Microsoft { namespace MSR { namespace CNTK {
 //
 // SplitDimension(x, dim, N) = ReshapeDimension(x, dim, 0:N)
 //  - splits a dimension into a new tensor dimension, injecting them into a new dimension
-//  - to split stacked frames into a new time dimension:
-//    insert new time dim with ReshapeDimension(., -1, 0:1), SplitDimension(., dim, N), Transpose(., dim+1, -1), then Select(., dim+1, 0) away the new time dim
-//    This would make 4 copies presently. We may need a compound C++ node for now.
 //  - note: to split into multiple outputs (like tf.split()), use a BrainScript loop with Slice().
 // -----------------------------------------------------------------------
 
 template <class ElemType>
 class ReshapeNode : public UnaryElementWiseNode<ElemType>
 {
-    typedef UnaryElementWiseNode<ElemType> Base;
-    UsingUnaryElementwiseNodeBaseMembers;
-    static const std::wstring TypeName()
-    {
-        return L"Reshape";
-    }
+    typedef UnaryElementWiseNode<ElemType> Base; UsingUnaryElementwiseNodeBaseMembers;
+    static const std::wstring TypeName() { return L"Reshape"; }
 
 public:
     ReshapeNode(DEVICEID_TYPE deviceId, const wstring& name, const TensorShape& replacementSampleLayout = TensorShape(), int beginDim = 1, int endDim = 0)
@@ -166,14 +158,8 @@ public:
         Input(inputIndex)->GradientFor(fr).SetValue(GradientFor(fr));
     }
 
-    virtual bool OutputUsedInComputingInputNodesGradients() const override
-    {
-        return false;
-    }
-    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override
-    {
-        return false;
-    }
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override { return false; }
 
 private:
     TensorShape m_replacementSampleLayout; // user-specified dimensions to replace dimensions [beginDim, endDim]
@@ -195,12 +181,8 @@ template class ReshapeNode<double>;
 template <class ElemType>
 class ReconcileMBLayoutNode : public ComputationNode<ElemType>, public NumInputs<2>
 {
-    typedef ComputationNode<ElemType> Base;
-    UsingComputationNodeMembersBoilerplate;
-    static const std::wstring TypeName()
-    {
-        return L"ReconcileMBLayout";
-    }
+    typedef ComputationNode<ElemType> Base; UsingComputationNodeMembersBoilerplate;
+    static const std::wstring TypeName() { return L"ReconcileMBLayout"; }
 
 public:
     DeclareConstructorFromConfigWithNumInputs(ReconcileMBLayoutNode);
@@ -209,27 +191,12 @@ public:
     {
     }
 
-    virtual void /*ComputationNode::*/ BackpropTo(const size_t /*inputIndex*/, const FrameRange& fr) override
-    {
-        Input(0)->GradientFor(fr.WithLayout(Input(0)->GetMBLayout())) += GradientFor(fr);
-        // TODO: Once we do in-place, the above must include a copy-to-self check (pay special attention to adding vs. copying).
-    }
-
-    virtual bool OutputUsedInComputingInputNodesGradients() const override
-    {
-        return false;
-    }
-    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override
-    {
-        return false;
-    }
-
     virtual void /*ComputationNode::*/ ForwardProp(const FrameRange& fr) override
     {
         // enforce compatibility of 'dataInput' with 'layoutInput'
         // TODO: how to deal with boundary flags?
         if (*m_pMBLayout != *Input(0)->GetMBLayout()) // this does a deep value-level comparison
-            InvalidArgument("%ls %ls operation discovered that %ls %ls operation produced an MB layout that is incompaitble with that of %ls %ls.",
+            InvalidArgument("%ls %ls operation discovered that %ls %ls operation produced an MB layout that is incompatible with that of %ls %ls.",
                             NodeName().c_str(), OperationName().c_str(),
                             Input(0)->NodeName().c_str(), Input(0)->OperationName().c_str(),
                             Input(1)->NodeName().c_str(), Input(1)->OperationName().c_str());
@@ -238,6 +205,15 @@ public:
         ValueFor(fr).SetValue(Input(0)->ValueFor(fr.WithLayout(Input(0)->GetMBLayout()))); // just propagate through
         // TODO: Once we do in-place, the above must include a copy-to-self check (either here or inside the matrix lib).
     }
+
+    virtual void /*ComputationNode::*/ BackpropTo(const size_t /*inputIndex*/, const FrameRange& fr) override
+    {
+        Input(0)->GradientFor(fr.WithLayout(Input(0)->GetMBLayout())) += GradientFor(fr);
+        // TODO: Once we do in-place, the above must include a copy-to-self check (pay special attention to adding vs. copying).
+    }
+
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override { return false; }
 
     virtual void /*ComputationNodeBase::*/ Validate(bool isFinalValidationPass) override
     {
@@ -256,27 +232,22 @@ template class ReconcileMBLayoutNode<double>;
 
 // -----------------------------------------------------------------------
 // RowSliceNode (input)
-// this node extracts part of the input by rows as the output
-// it has to be continuous segments of rows since each column is treated as one sample
+// This node extracts a slice of the first tensor dimension (row).
+// TODO: Extend to specifying the axis. Time slicing would have to be done in BrainScript using Gather.
 // -----------------------------------------------------------------------
 
 template <class ElemType>
 class RowSliceNode : public ComputationNode<ElemType>, public NumInputs<1>
 {
-    typedef ComputationNode<ElemType> Base;
-    UsingComputationNodeMembersBoilerplate;
-    static const std::wstring TypeName()
-    {
-        return L"RowSlice";
-    }
+    typedef ComputationNode<ElemType> Base; UsingComputationNodeMembersBoilerplate;
+    static const std::wstring TypeName() { return L"RowSlice"; }
 
 public:
     RowSliceNode(DEVICEID_TYPE deviceId, const wstring& name, size_t startIndex = 0, size_t numRows = 0)
-        : Base(deviceId, name),
-          m_startIndex(startIndex),
-          m_sliceHeight(numRows)
+        : Base(deviceId, name), m_startIndex(startIndex), m_sliceHeight(numRows)
     {
     }
+
     RowSliceNode(const ScriptableObjects::IConfigRecordPtr configp)
         : RowSliceNode(configp->Get(L"deviceId"), L"<placeholder>", configp->Get(L"startIndex"), configp->Get(L"numRows"))
     {
@@ -292,58 +263,67 @@ public:
         node->m_sliceHeight = m_sliceHeight;
     }
 
-    virtual void Save(File& fstream) const override
-    {
-        Base::Save(fstream);
-        fstream << m_startIndex << m_sliceHeight;
-    }
-
     virtual void Load(File& fstream, size_t modelVersion) override
     {
         Base::Load(fstream, modelVersion);
         fstream >> m_startIndex >> m_sliceHeight;
+        int dim; // preparation for future extension that stores a dimension along which we slice
+        if (modelVersion >= CNTK_MODEL_VERSION_3)
+            fstream >> dim;
+    }
+
+    virtual void Save(File& fstream) const override
+    {
+        Base::Save(fstream);
+        fstream << m_startIndex << m_sliceHeight;
+        int dim = 1; // preparation for future extension that stores a dimension along which we slice
+        fstream << dim;
+    }
+
+private:
+
+    // determine the tensor shape that represents slice of the input that we are taking
+    TensorShape GetInputSlice(size_t rank, const FrameRange & fr) const
+    {
+        auto inputSlice = Input(0)->GetTensorSliceFor(rank, fr);    // input must be narrowed down
+        inputSlice.NarrowTo(0, m_startIndex, m_startIndex + m_sliceHeight);
+        return inputSlice;
+    }
+
+public:
+
+    virtual void /*ComputationNode::*/ ForwardProp(const FrameRange& fr) override
+    {
+        size_t rank = DetermineElementwiseTensorRank();
+        auto output =                                ValueTensorFor(rank,         fr);
+        let   input = TensorView<ElemType>(Input(0)->Value(), GetInputSlice(rank, fr.AllowBroadcast()));
+        output.AssignCopyOf(input);
     }
 
     virtual void /*ComputationNode::*/ BackpropTo(const size_t /*inputIndex*/, const FrameRange& fr) override
     {
-        Input(0)->GradientFor(fr).AddToRowSliceValuesOf(GradientFor(fr), m_startIndex, m_sliceHeight);
+        size_t rank = DetermineElementwiseTensorRank();
+        let outputGrad =                                GradientTensorFor(rank,         fr);
+        auto inputGrad = TensorView<ElemType>(Input(0)->Gradient(), GetInputSlice(rank, fr));
+        inputGrad.AddCopyOf(outputGrad);
     }
 
-    virtual bool OutputUsedInComputingInputNodesGradients() const override
-    {
-        // The RowSliceNode does not require its output value for computing
-        // the gradients of its input nodes
-        return false;
-    }
-
-    virtual bool InputUsedInComputingInputNodesGradients(size_t childIndex) const override
-    {
-        // The RowSliceNode does not require any of it's input's values for computing
-        // the gradients of its input nodes
-        UNREFERENCED_PARAMETER(childIndex);
-        return false;
-    }
-
-    virtual void /*ComputationNode::*/ ForwardProp(const FrameRange& fr) override
-    {
-        ValueFor(fr).AssignRowSliceValuesOf(Input(0)->ValueFor(fr), m_startIndex, m_sliceHeight);
-    }
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override { return false; }
 
     virtual void /*ComputationNodeBase::*/ Validate(bool isFinalValidationPass) override
     {
         Base::Validate(isFinalValidationPass);
         InferMBLayoutFromInputsForStandardCase();
 
-        if (isFinalValidationPass && Input(0)->GetSampleMatrixNumRows() < m_startIndex + m_sliceHeight)
-            RuntimeError("%ls %ls operation: m_startIndex + m_sliceHeight exceeds number of rows in the input.", NodeName().c_str(), OperationName().c_str());
+        auto sampleLayout = Input(0)->GetSampleLayout();
+        if (isFinalValidationPass && sampleLayout[0] < m_startIndex + m_sliceHeight)
+            RuntimeError("%ls %ls operation: m_startIndex + m_sliceHeight (%d) exceeds number of rows in the input ([%s]).", NodeName().c_str(), OperationName().c_str(), (int)(m_startIndex + m_sliceHeight), string(sampleLayout).c_str());
 
-        // RowSlice cannot slice tensors.
-        // TODO: Create a TensorSlice operation, or just Slice.
-        if (isFinalValidationPass && !Input(0)->GetSampleLayout().IsColumnVector()
-            && !Input(0)->GetSampleLayout().IsVectorStoredAsImage() // legacy
-            )
-            RuntimeError("%ls %ls operation: Input must be a vector, tensor shape [%s] not allowed.", NodeName().c_str(), OperationName().c_str(), string(Input(0)->GetSampleLayout()).c_str());
-        SetDims(TensorShape(m_sliceHeight), HasMBLayout());
+        if (sampleLayout[0] >= m_startIndex + m_sliceHeight)    // (this guards against failing an out-of-bounds error if not isFinalValidationPass)
+            sampleLayout.NarrowTo(0, m_startIndex, m_startIndex + m_sliceHeight);
+
+        SetDims(TensorShape(sampleLayout.GetDims()), HasMBLayout());
     }
 
 private:
@@ -354,28 +334,22 @@ template class RowSliceNode<float>;
 template class RowSliceNode<double>;
 
 // -----------------------------------------------------------------------
-// RowStackNode (input0, input1, ...)
+// RowStack (input0, input1, ...)
 // stacks multiple inputs on top of each other
 // The inputs will be spliced w.r.t. their first tensor dimension (the "row" dimension).
-// TODO: This is very close to the planned SpliceNode (just make m_spliceDim configurable) except for splicing along time.
+// TODO: This is very close to the planned SpliceNode (just make m_spliceDim actually configurable) except for splicing along time.
 // -----------------------------------------------------------------------
 
 template <class ElemType>
 class RowStackNode : public ComputationNode<ElemType> // note: not deriving from NumInputs<> like most other nodes, because this one takes a variable number of inputs
 {
-    typedef ComputationNode<ElemType> Base;
-    UsingComputationNodeMembersBoilerplate;
-    static const std::wstring TypeName()
-    {
-        return L"RowStack";
-    }
-
-    static const size_t m_spliceDim = 0;    // tensor dimension according to which to stack  --TODO: Make this a parameter.
+    typedef ComputationNode<ElemType> Base; UsingComputationNodeMembersBoilerplate;
+    static const std::wstring TypeName() { return L"RowStack"; }
 
 public:
     DeclareConstructorFromConfig(RowStackNode);
-    RowStackNode(DEVICEID_TYPE deviceId, const wstring& name)
-        : Base(deviceId, name)
+    RowStackNode(DEVICEID_TYPE deviceId, const wstring& name, int spliceDim = 1/*TODO: complete this*/)
+        : Base(deviceId, name), m_spliceDim(spliceDim)
     {
     }
 
@@ -389,18 +363,33 @@ public:
         }
     }
 
-private:
+    virtual void Load(File& fstream, size_t modelVersion) override
+    {
+        Base::Load(fstream, modelVersion);
+        if (modelVersion >= CNTK_MODEL_VERSION_3)
+            fstream >> m_spliceDim;
+        else
+            m_spliceDim = 1;
+    }
 
+    virtual void Save(File& fstream) const override
+    {
+        Base::Save(fstream);
+        fstream << m_spliceDim;
+    }
+
+private:
     // changes the result slice (which includes all stacked inputs) to the stripe that matches where one of the inputs goes
     TensorShape NarrowToStripe(const TensorShape & resultSlice, size_t inputIndex)
     {
         auto resultSubSlice = resultSlice;
-        resultSubSlice.NarrowTo(m_spliceDim, m_firstIndices[inputIndex], m_firstIndices[inputIndex + 1]);
+        assert(m_spliceDim > 0);
+        size_t index = (size_t)m_spliceDim - 1;
+        resultSubSlice.NarrowTo(index, m_firstIndices[inputIndex], m_firstIndices[inputIndex + 1]);
         return resultSubSlice;
     }
 
 public:
-
     virtual void /*ComputationNode::*/ ForwardProp(const FrameRange& fr) override
     {
         size_t rank = DetermineElementwiseTensorRank();
@@ -438,16 +427,18 @@ public:
         // All dimensions but the last must be the same. (In a future version, we should be able to stack along any given dimension.)
 
         // determine maximum rank (we can stack tensors with lower rank, which will have their dimensions paded to max automatically)
-        size_t maxRank = m_spliceDim + 1; // spliceDim may exceed all of them, which will create a new dimension, e.g. stacking column vectors into a matrix
+        assert(m_spliceDim > 0);
+        size_t index = (size_t)m_spliceDim - 1;
+        size_t maxRank = index + 1; // spliceDim may exceed all of them, which will create a new dimension, e.g. stacking column vectors into a matrix
         for (int i = 0; i < GetNumInputs(); i++)
             if (maxRank < Input(i)->GetSampleLayout().GetRank())
                 maxRank = Input(i)->GetSampleLayout().GetRank();
 
         // the following loop does multiple things:
-        //  - count total dimension along m_spliceDim, and form associated m_firstIndices[] array
+        //  - count total dimension along index, and form associated m_firstIndices[] array
         //  - verify all other dimension's compatibility (we allow broadcasting)
         auto dims = Input(0)->GetSampleLayout().PadRank(maxRank).GetDims(); // dimensions padded to max rank; start with dims of first input
-        dims[m_spliceDim] = 0;                                              // this dimension is created, while all others are verified for consistency
+        dims[index] = 0;                                                    // this dimension is created, while all others are verified for consistency
         m_firstIndices.assign(1, 0);                                        // accumulative splice dimension; start with 0
         for (int i = 0; i < GetNumInputs(); i++)
         {
@@ -456,11 +447,11 @@ public:
             for (size_t k = 0; k < maxRank; k++)
             {
                 size_t dim = shape.GetDimPadded(k);
-                if (k == m_spliceDim)
+                if (k == index)
                 {
                     // accumulate the spliced dimension
-                    dims[m_spliceDim] += dim;
-                    m_firstIndices.push_back(dims[m_spliceDim]);    // and remember it
+                    dims[index] += dim;
+                    m_firstIndices.push_back(dims[index]);    // and remember it
                 }
                 else
                 {
@@ -478,7 +469,8 @@ public:
     }
 
 private:
-    std::vector<size_t> m_firstIndices;  // start row number in the stacked matrix of each input (child) (cumsum of matrix heights); plus one final entry that equals the total dimension
+    std::vector<size_t> m_firstIndices; // start row number in the stacked matrix of each input (child) (cumsum of matrix heights); plus one final entry that equals the total dimension
+    int m_spliceDim;                    // tensor dimension according to which to stack (1-based)
 };
 
 template class RowStackNode<float>;
@@ -491,12 +483,8 @@ template class RowStackNode<double>;
 template <class ElemType>
 class RowRepeatNode : public ComputationNode<ElemType>, public NumInputs<1>
 {
-    typedef ComputationNode<ElemType> Base;
-    UsingComputationNodeMembersBoilerplate;
-    static const std::wstring TypeName()
-    {
-        return L"RowRepeat";
-    }
+    typedef ComputationNode<ElemType> Base; UsingComputationNodeMembersBoilerplate;
+    static const std::wstring TypeName() { return L"RowRepeat"; }
 
 public:
     RowRepeatNode(DEVICEID_TYPE deviceId, const wstring& name, size_t numRepeats = 1)
@@ -532,10 +520,9 @@ public:
         fstream >> m_numRepeat;
     }
 
-    virtual void PrintSelfBeforeValidation() const override
+    virtual std::string FormatOperationPrototype(const std::string& extraArgs) const override
     {
-        Base::PrintSelfBeforeValidation();
-        fprintf(stderr, ", numRepeats=%lu", m_numRepeat);
+        return Base::FormatOperationPrototype(extraArgs + msra::strfun::strprintf(", numRepeats=%lu", m_numRepeat));
     }
 
     virtual void /*ComputationNodeBase::*/ Validate(bool isFinalValidationPass) override
@@ -561,20 +548,8 @@ public:
         Input(0)->GradientFor(fr).AddToRowRepeatValuesOf(GradientFor(fr), m_numRepeat);
     }
 
-    virtual bool OutputUsedInComputingInputNodesGradients() const override
-    {
-        // The RowRepeatNode does not require its output value for computing
-        // the gradients of its input nodes
-        return false;
-    }
-
-    virtual bool InputUsedInComputingInputNodesGradients(size_t childIndex) const override
-    {
-        // The RowRepeatNode does not require any of it's input's values for computing
-        // the gradients of its input nodes
-        UNREFERENCED_PARAMETER(childIndex);
-        return false;
-    }
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override { return false; }
 
 private:
     size_t m_numRepeat;
@@ -584,42 +559,166 @@ template class RowRepeatNode<float>;
 template class RowRepeatNode<double>;
 
 // -----------------------------------------------------------------------
+// WhereNode(cond) -- extract indices of non-0 values in a sequence
+// As this implies a runtime-value dependent reduction in dimension, it can
+// only be applied to time sequences, and not other tensor dimensions.
+// The result will have a different MBLayout reflecting the shortened result sequences.
+// -----------------------------------------------------------------------
+
+/* Notes on Where(), PackedIndex(), and Gather-/ScatterPacked():
+This is one of the few nodes that creates new MBLayouts inside this system.
+This node is meant to operate jointly with PackedIndexNode.
+The difference between Index and PackedIndex is that Index is in human-readable
+form referring to indices WITHIN a sequence (since NDL and BS only talk about individual
+sequences and never expose anything cross-sequence, except for aggregates like CE or BN.
+PackedIndex maps that to the internal lookup table that has strides resolved etc.
+The reason that PackedIndex is separate from Gather/ScatterPacked is that the GPU has no
+access to the STL-heavy MBLayout. So PackedIndex applies the relevant information from
+the MBLayout into a GPU object that then drives the memory-copy operations in Gather()
+and Scatter().
+*/
+
+template <class ElemType>
+class WhereNode : public ComputationNodeNonLooping<ElemType>, public NumInputs<1>
+{
+    typedef ComputationNodeNonLooping<ElemType> Base; UsingComputationNodeMembersBoilerplate;
+    static const std::wstring TypeName() { return L"Where"; }
+
+public:
+    DeclareConstructorFromConfigWithNumInputs(WhereNode);
+    WhereNode(DEVICEID_TYPE deviceId, const wstring& name) :
+        Base(deviceId, name)
+    {
+    }
+
+    virtual void /*ComputationNodeNonLooping::*/ ForwardPropNonLooping() override;
+    virtual void /*ComputationNodeNonLooping::*/ BackpropToNonLooping(size_t /*inputIndex*/) override;
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override { return false; }
+    virtual void Validate(bool isFinalValidationPass) override;
+
+private:
+    // buffers for creating the result sequences (kept as object state to avoid memory allocations)
+    std::vector<std::vector<size_t>>   m_indexSequenceBuffer; // [sequenceIndex][t] for creating the result sequences
+    std::vector<size_t>               m_rowAllocationsBuffer; // [row] for determining new MBLayout packing
+    std::vector<std::pair<size_t, size_t>> m_placementBuffer; // [sequenceIndex] assigned location for a sequence
+};
+
+// -----------------------------------------------------------------------
+// PackedIndexNode(targetObject, indexSequence) -- convert sequence indices
+// to internal packed column indices w.r.t. targetObject.
+// Intended use is
+//  - Gather  (cond, x) = GatherPacked  (PackedIndex (x, Where (xCond)), x)
+//  - Scatter (cond, y) = ScatterPacked (yCond, PackedIndex (y, Where (yCond)), y)
+// This maps sequence-specific time indices t to GetColumnIndex(seq,t),
+// as input for subsequent GatherPacked() or ScatterPacked() operations.
+// -----------------------------------------------------------------------
+
+template <class ElemType>
+class PackedIndexNode : public ComputationNodeNonLooping<ElemType>, public NumInputs<2>
+{
+    typedef ComputationNodeNonLooping<ElemType> Base; UsingComputationNodeMembersBoilerplate;
+    static const std::wstring TypeName() { return L"PackedIndex"; }
+
+    // our inputs
+    static const size_t SOURCEDATA = 0;
+    static const size_t INDEXDATA  = 1;
+
+public:
+    DeclareConstructorFromConfigWithNumInputs(PackedIndexNode);
+    PackedIndexNode(DEVICEID_TYPE deviceId, const wstring& name) :
+        Base(deviceId, name)
+    {
+    }
+
+    virtual void /*ComputationNodeNonLooping::*/ ForwardPropNonLooping() override;
+    virtual void /*ComputationNodeNonLooping::*/ BackpropToNonLooping(size_t /*inputIndex*/) override;
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override { return false; }
+    virtual void Validate(bool isFinalValidationPass) override;
+};
+
+// -----------------------------------------------------------------------
+// GatherPackedNode(packedIndex, sourceData) -- gather operation
+// Copies subset of samples pointed to by packedIndex from sourceData.
+// Sequence lengths are equal to those from packedIndex.
+// PackedIndex must have been created with PackedIndex() node, and is
+// otherwise opaque to users.
+// -----------------------------------------------------------------------
+
+template <class ElemType>
+class GatherPackedNode : public ComputationNodeNonLooping<ElemType>, public NumInputs<2>
+{
+    typedef ComputationNodeNonLooping<ElemType> Base; UsingComputationNodeMembersBoilerplate;
+    static const std::wstring TypeName() { return L"GatherPacked"; }
+
+    // our inputs
+    static const size_t INDEXDATA = 0;
+    static const size_t SOURCEDATA = 1;
+
+public:
+    DeclareConstructorFromConfigWithNumInputs(GatherPackedNode);
+    GatherPackedNode(DEVICEID_TYPE deviceId, const wstring& name) :
+        Base(deviceId, name)
+    {
+    }
+
+    virtual void /*ComputationNodeNonLooping::*/ ForwardPropNonLooping() override;
+    virtual void /*ComputationNodeNonLooping::*/ BackpropToNonLooping(size_t inputIndex) override;
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t childIndex) const override { return childIndex == INDEXDATA; }
+    virtual void Validate(bool isFinalValidationPass) override;
+};
+
+// -----------------------------------------------------------------------
+// ScatterPackedNode(layoutData, packedIndex, sourceData) -- scatter operation
+// Copies sourceData to sample positions pointed to by packedIndex.
+// The first arg, 'layoutData', is used only to determine sequence lengths,
+// and should be the same that was used to Where().
+// PackedIndex must have been created with PackedIndex() node, and is
+// otherwise opaque to users.
+// -----------------------------------------------------------------------
+
+template <class ElemType>
+class ScatterPackedNode : public ComputationNodeNonLooping<ElemType>, public NumInputs<3>
+{
+    typedef ComputationNodeNonLooping<ElemType> Base; UsingComputationNodeMembersBoilerplate;
+    static const std::wstring TypeName() { return L"ScatterPacked"; }
+
+    // our inputs
+    static const size_t LAYOUTDATA = 0;
+    static const size_t INDEXDATA  = 1;
+    static const size_t SOURCEDATA = 2;
+
+public:
+    DeclareConstructorFromConfigWithNumInputs(ScatterPackedNode);
+    ScatterPackedNode(DEVICEID_TYPE deviceId, const wstring& name) :
+        Base(deviceId, name)
+    {
+    }
+
+    virtual void /*ComputationNodeNonLooping::*/ ForwardPropNonLooping() override;
+    virtual void /*ComputationNodeNonLooping::*/ BackpropToNonLooping(size_t inputIndex) override;
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t childIndex) const override { return childIndex == INDEXDATA; }
+    virtual void Validate(bool isFinalValidationPass) override;
+};
+
+// -----------------------------------------------------------------------
 // DiagonalNode -- extract diagonal elements of a square matrix into a row vector
 // -----------------------------------------------------------------------
 
 template <class ElemType>
 class DiagonalNode : public ComputationNodeNonLooping<ElemType>, public NumInputs<1>
 {
-    typedef ComputationNodeNonLooping<ElemType> Base;
-    UsingComputationNodeMembersBoilerplate;
-    static const std::wstring TypeName()
-    {
-        return L"Diagonal";
-    }
+    typedef ComputationNodeNonLooping<ElemType> Base; UsingComputationNodeMembersBoilerplate;
+    static const std::wstring TypeName() { return L"Diagonal"; }
 
 public:
     DeclareConstructorFromConfigWithNumInputs(DiagonalNode);
     DiagonalNode(DEVICEID_TYPE deviceId, const wstring& name)
         : Base(deviceId, name)
     {
-    }
-
-    virtual void Validate(bool isFinalValidationPass) override
-    {
-        Base::Validate(isFinalValidationPass);
-        m_pMBLayout = nullptr;
-
-        if (isFinalValidationPass && Input(0)->HasMBLayout())
-            InvalidArgument("%ls %ls operation cannot operate on minibatch data (which have a layout)", NodeName().c_str(), OperationName().c_str());
-
-        size_t dim = Input(0)->GetAsMatrixNumCols();
-        if (isFinalValidationPass && dim != Input(0)->GetAsMatrixNumRows())
-            InvalidArgument("%ls %ls operation requires a square matrix as its input.", NodeName().c_str(), OperationName().c_str());
-
-        if (Input(0)->HasSampleLayout())
-            fprintf(stderr, "WARNING: Diagonal operation cannot inherit image size information from its child. Image size info is lost.\n");
-
-        SetDims(TensorShape(1, dim), false);
     }
 
     virtual void /*ComputationNodeNonLooping::*/ ForwardPropNonLooping() override
@@ -632,33 +731,44 @@ public:
 
     virtual void /*ComputationNodeNonLooping::*/ BackpropToNonLooping(size_t /*inputIndex*/) override
     {
+#if 1
+        NOT_IMPLEMENTED;
+#else
+        // The Implementation below is currently broken
         auto& inputGradientValues = Input(0)->GradientAsMatrix();
         auto& gradientValues = GradientAsMatrix();
 
         // BUGBUG: This should use the memshare mechanism.
         // TODO: use tensor lib, then this will be easy, no memsharing needed
-        Matrix<ElemType> diag(gradientValues.GetNumRows(), gradientValues.GetNumCols(), gradientValues.GetDeviceId());
-        diag = gradientValues;
+        Matrix<ElemType> diag = gradientValues.DeepClone();
+        // BUGBUG: Resize does not preserve data - should be a reinterpret operation
         diag.Resize(gradientValues.GetNumCols(), 1);
 
         inputGradientValues.SetValue(0);
         // BUGBUG: Must *add* to gradient!
         inputGradientValues.SetDiagonalValue(diag);
+#endif
     }
 
-    virtual bool OutputUsedInComputingInputNodesGradients() const override
-    {
-        // The DiagonalNode does not require its output value for computing
-        // the gradients of its input nodes
-        return false;
-    }
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override { return false; }
 
-    virtual bool InputUsedInComputingInputNodesGradients(size_t childIndex) const override
+    virtual void Validate(bool isFinalValidationPass) override
     {
-        // The DiagonalNode does not require any of it's input's values for computing
-        // the gradients of its input nodes
-        UNREFERENCED_PARAMETER(childIndex);
-        return false;
+        Base::Validate(isFinalValidationPass);
+        m_pMBLayout = nullptr;
+
+        if (isFinalValidationPass && Input(0)->HasMBLayout())
+            InvalidArgument("%ls %ls operation cannot operate on minibatch data (which have a layout).", NodeName().c_str(), OperationName().c_str());
+
+        size_t dim = Input(0)->GetAsMatrixNumCols();
+        if (isFinalValidationPass && dim != Input(0)->GetAsMatrixNumRows())
+            InvalidArgument("%ls %ls operation requires a square matrix as its input.", NodeName().c_str(), OperationName().c_str());
+
+        if (Input(0)->HasSampleLayout())
+            fprintf(stderr, "WARNING: Diagonal operation cannot inherit image size information from its child. Image size info is lost.\n");
+
+        SetDims(TensorShape(1, dim), false);
     }
 };
 
@@ -768,7 +878,7 @@ public:
 
 #define UsingReinterpretNodeBaseMembers UsingComputationNodeMembersBoilerplate
 
-// TODO: This ReshapeNode is currently not used. Its function will be taken over by Transpose and the Reshape that follows this one below.
+// TODO: This ReshapeNode should no longer be used. Its function will be taken over by Transpose and the Reshape that follows this one below.
 
 // -----------------------------------------------------------------------
 // LegacyReshapeNode (input) -- reinterpret input matrix as having different dimensions
@@ -839,13 +949,6 @@ public:
         }
     }
 
-    virtual void Save(File& fstream) const override
-    {
-        Base::Save(fstream);
-        fstream << m_numTargetRows;
-        m_targetImageLayout.Save(fstream);
-    }
-
     virtual void Load(File& fstream, size_t modelVersion) override
     {
         Base::Load(fstream, modelVersion);
@@ -853,72 +956,16 @@ public:
         m_targetImageLayout.Load(fstream, /*acceptLegacyFormat=*/true);
     }
 
-    virtual void /*IComputationNode::*/ PrintSelfBeforeValidation() const override
+    virtual void Save(File& fstream) const override
     {
-        fprintf(stderr, "\nValidating --> %ls = %ls", NodeName().c_str(), OperationName().c_str());
-        fprintf(stderr, "(");
-        for (size_t i = 0; i < GetNumInputs(); i++)
-        {
-            ComputationNodePtr child = Input(i);
-            if (i > 0)
-                fprintf(stderr, ", ");
-            if (!child)
-                fprintf(stderr, "NULL");
-            else
-                fprintf(stderr, "%ls[%s%s]", child->NodeName().c_str(), string(child->GetSampleLayout()).c_str(), child->HasMBLayout() ? " x *" : "");
-        }
-        fprintf(stderr, ", NumOfRows=%lu, imageWidth=%lu, imageHeight=%lu, imageChannels=%lu)", m_numTargetRows, m_targetImageLayout[1], m_targetImageLayout[2], m_targetImageLayout[0]);
-        // BUGBUG: This interpretaion as image dims is only correct for the 'legacy format, not for cudnn.
+        Base::Save(fstream);
+        fstream << m_numTargetRows;
+        m_targetImageLayout.Save(fstream);
     }
 
-    virtual void /*ComputationNodeBase::*/ Validate(bool isFinalValidationPass) override
+    virtual std::string /*IComputationNode::*/ FormatOperationPrototype(const std::string& extraArgs) const override
     {
-        Base::Validate(isFinalValidationPass);
-        if (factor() == 1) // canonical case: keeps the MBLayout(e.g. only changing the TensorShape)
-            m_pMBLayout = Input(0)->GetMBLayout();
-        else if (Input(0)->HasMBLayout())
-        {
-            if (!m_pMBLayout)
-                m_pMBLayout = make_shared<MBLayout>(); // mini-batch data: this generates a new layout
-        }
-        else
-            assert(!m_pMBLayout); // reshaping non-mini-batch data
-
-        size_t newCols = 1; // dummy
-        if (!m_pMBLayout)
-        {
-            size_t rows = Input(0)->GetAsMatrixNumRows(), cols = Input(0)->GetAsMatrixNumCols();
-            newCols = cols * rows / m_numTargetRows;
-            if (isFinalValidationPass)
-            {
-                if ((m_numTargetRows > rows && m_numTargetRows % rows != 0) || // grouping columns
-                    (m_numTargetRows < rows && rows % m_numTargetRows != 0))   // splitting columns
-                    InvalidArgument("%ls %ls operation: output row dimension %d is not an integer multiple or divisor of input dimension %d", NodeName().c_str(), OperationName().c_str(), (int) m_numTargetRows, (int) rows);
-                if (rows * cols != m_numTargetRows * newCols)
-                    LogicError("%ls %ls operation: unexpected dimension mismatch", NodeName().c_str(), OperationName().c_str());
-            }
-        }
-
-        // patch up m_targetImageLayout, which was originally a construction parameter
-        InferTargetSampleLayout();
-
-        // setting any dimension to 0 means lose the tensor, flatten to vector
-        if (m_targetImageLayout.GetNumElements() == 0)
-        {
-            if (Input(0)->HasSampleLayout())
-                fprintf(stderr, "WARNING: Reshape operation cannot inherit image size information from its child. Image size info is lost.\n");
-            // TODO: We need to decide what reshaping means in presence of a tensor.
-            if (HasMBLayout())
-                SetDims(TensorShape(m_numTargetRows), true);
-            else
-                SetDims(TensorShape(m_numTargetRows, newCols), false);
-        }
-        else
-        {
-            if (m_numTargetRows != m_targetImageLayout.GetNumElements())
-                LogicError("LegacyReshapeNode: InferTargetSampleLayout() computed a sample layout [%s] that mismatches m_numTargetRows %d.", string(m_targetImageLayout).c_str(), (int) m_numTargetRows);
-            SetDims(m_targetImageLayout, HasMBLayout());
-        }
+        return Base::FormatOperationPrototype(extraArgs + msra::strfun::strprintf(", NumOfRows=%lu, imageWidth=%lu, imageHeight=%lu, imageChannels=%lu)", m_numTargetRows, m_targetImageLayout[1], m_targetImageLayout[2], m_targetImageLayout[0]));
     }
 
     // TODO: Clarify/resolve the semantic overlap between BeginForwardProp() and UpdateFunctionMBSize().
@@ -1002,19 +1049,57 @@ public:
         }
     }
 
-    virtual bool OutputUsedInComputingInputNodesGradients() const override
-    {
-        // The LegacyReshapeNode does not require its output value for computing
-        // the gradients of its input nodes
-        return false;
-    }
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override { return false; }
 
-    virtual bool InputUsedInComputingInputNodesGradients(size_t childIndex) const override
+    virtual void /*ComputationNodeBase::*/ Validate(bool isFinalValidationPass) override
     {
-        // The LegacyReshapeNode does not require any of it's input's values for computing
-        // the gradients of its input nodes
-        UNREFERENCED_PARAMETER(childIndex);
-        return false;
+        Base::Validate(isFinalValidationPass);
+        if (factor() == 1) // canonical case: keeps the MBLayout(e.g. only changing the TensorShape)
+            m_pMBLayout = Input(0)->GetMBLayout();
+        else if (Input(0)->HasMBLayout())
+        {
+            if (!m_pMBLayout)
+                m_pMBLayout = make_shared<MBLayout>(); // mini-batch data: this generates a new layout
+        }
+        else
+            assert(!m_pMBLayout); // reshaping non-mini-batch data
+
+        size_t newCols = 1; // dummy
+        if (!m_pMBLayout)
+        {
+            size_t rows = Input(0)->GetAsMatrixNumRows(), cols = Input(0)->GetAsMatrixNumCols();
+            newCols = cols * rows / m_numTargetRows;
+            if (isFinalValidationPass)
+            {
+                if ((m_numTargetRows > rows && m_numTargetRows % rows != 0) || // grouping columns
+                    (m_numTargetRows < rows && rows % m_numTargetRows != 0))   // splitting columns
+                    InvalidArgument("%ls %ls operation: output row dimension %d is not an integer multiple or divisor of input dimension %d", NodeName().c_str(), OperationName().c_str(), (int) m_numTargetRows, (int) rows);
+                if (rows * cols != m_numTargetRows * newCols)
+                    LogicError("%ls %ls operation: unexpected dimension mismatch", NodeName().c_str(), OperationName().c_str());
+            }
+        }
+
+        // patch up m_targetImageLayout, which was originally a construction parameter
+        InferTargetSampleLayout();
+
+        // setting any dimension to 0 means lose the tensor, flatten to vector
+        if (m_targetImageLayout.GetNumElements() == 0)
+        {
+            if (Input(0)->HasSampleLayout())
+                fprintf(stderr, "WARNING: Reshape operation cannot inherit image size information from its child. Image size info is lost.\n");
+            // TODO: We need to decide what reshaping means in presence of a tensor.
+            if (HasMBLayout())
+                SetDims(TensorShape(m_numTargetRows), true);
+            else
+                SetDims(TensorShape(m_numTargetRows, newCols), false);
+        }
+        else
+        {
+            if (m_numTargetRows != m_targetImageLayout.GetNumElements())
+                LogicError("LegacyReshapeNode: InferTargetSampleLayout() computed a sample layout [%s] that mismatches m_numTargetRows %d.", string(m_targetImageLayout).c_str(), (int) m_numTargetRows);
+            SetDims(m_targetImageLayout, HasMBLayout());
+        }
     }
 
 private:
@@ -1116,7 +1201,6 @@ reshaping
         - just replaces metadata m_sampleLayout
         - one dimension may be specified as 0 and will be inferred
         - optional beginDim/endDim denote to only replace a sub-range of dims, for implementing ReshapeDimension() and FlattenRank()
-        - may not be applied to time; use Permute() or Transpose()
     - ReshapeDimension(x, dim, tensorShape) = Reshape(x, tensorShape, beginDim=dim, endDim=dim+1)
        - reinterprets one dimension as multiple, where the number of elements remains the same
        - one of the new dimensions may be specified as 0 and will be inferred
@@ -1124,9 +1208,6 @@ reshaping
        - replace two or more consecutive dims by a single dim with the same number of elements
     - SplitDimension(x, dim, N) = ReshapeDimension(x, dim, 0:N)
        - splits a dimension into a new tensor dimension, injecting them into a new dimension
-       - to split stacked frames into a new time dimension:
-         insert new time dim with ReshapeDimension(., -1, 0:1), SplitDimension(., dim, N), Transpose(., dim+1, -1), then Select(., dim+1, 0) away the new time dim
-         This would make 4 copies presently. We may need a compound C++ node for now.
        - note: to split into multiple outputs (like tf.split()), use a BrainScript loop with Slice().
  - Slicing   --all implemented in C++ by SliceNode
     - Slice(x, dim, begin, end, stride=1, phase=0)
@@ -1170,16 +1251,15 @@ reshaping
        - generalizes CNTK RowRepeat(x, numRepeats) = Repeat(x, 1, numRepeats)
        - to repeat multiple, specify vectors, e.g. Repeat(x, dim1:dim2, numRepeats1:numRepeats2)
        - like tf.tile() and Matlab's repmat()
- - Transposition (permuting dims):   --implemented in C++ by PermuteDimensionsNode
-    - PermuteDimensionsOf(x, dim1:dim2:...:dimN)
-       - dims are rotated to dim2:dim3:...:dimN:dim1; other dims remain untouched
-         To rotate the other way round, specify them in opposite order.
-         We specify it this way to be able to reference the time dimension without having to know the rank of the m_sampleLayout.
-       - time dims must have a constant duration for all items in the minibatch
-       - internally implemented with tensor lib by shuffling dimensions with their strides  --TODO: check if TensorShape optimization is still correct
-    - Transpose(x, dim1, dim2) = PermuteDimensions(x, dim1:dim2)
-       - any two dimensions; including time (must have constant duration)
+ - Transposition
+    - TransposeDimensions (input, dim1, dim2)
+       - swaps index dimensions dim1 and dim2. The values are 1-based; 1 stands for the leading dimension.
+       - new dimensions can be created; e.g. a column vector can be transposed into a row vector, which is a [1 x N] tensor
+       - transposing into the time dimension is currently not supported
+       - internally implemented with tensor lib by shuffling dimensions with their strides
+       - input may be minibatch data or not
        - like torch.transpose()
+    - Transpose (input) = TransposeDimensions (input, 1, 2)
  - Re-indexing:   --implemented by ReindexRankNode and SliceNode
     - ReindexDimension(x, dim, indexVector)
        - splice x[..., indexVector[0], ...], x[..., indexVector[1], ...], etc. with indexVector[.] at given dim
@@ -1187,6 +1267,7 @@ reshaping
     - DownsampleDimension(x, dim, n, phase=0) = Slice(x, dim, 0, 0, stride=n)
        - select every n-th element, starting with index 'phase'
        - time dims allowed. Phase is then a modulus w.r.t. where a sequence is inside the minibatch (may require a ReconcileLayout() before to match layouts)
+       - TODO: use a bool vector for the time dimensions
     - ReverseDimension(x, dim) = Slice(x, dim, -1, 0, stride=-1)
        - reverses the direction of a dim
        - when applied to time dims, this creates a new layout (which is also flipped)

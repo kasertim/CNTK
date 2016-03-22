@@ -25,112 +25,80 @@
     <ProjectName>ReaderTests</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64' Or '$(Configuration)|$(Platform)'=='Debug_CpuOnly|x64'" Label="Configuration">
+  <Import Project="$(SolutionDir)\CNTK.Cpp.props" />
+  <PropertyGroup>
+    <HasBoost>false</HasBoost>
+    <HasBoost Condition="Exists('$(BOOST_INCLUDE_PATH)') And Exists('$(BOOST_LIB_PATH)')">true</HasBoost>
+    <HasOpenCV>false</HasOpenCV>
+    <HasOpenCV Condition="Exists('$(OPENCV_PATH)')">true</HasOpenCV>
+    <ImageReaderDefine Condition="$(HasOpenCV)">ENABLE_IMAGEREADER_TESTS</ImageReaderDefine>
+    <UseZip>false</UseZip>
+    <UseZip Condition="Exists('$(ZLIB_PATH)')">true</UseZip>
+    <ZipDefine Condition="$(HasOpenCV) And $(UseZip)">USE_ZIP</ZipDefine>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
-    <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v120</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
     <UseOfMfc>false</UseOfMfc>
   </PropertyGroup>
-  <Choose>
-    <When Condition="Exists('$(BOOST_INCLUDE_PATH)') And Exists('$(BOOST_LIB_PATH)')">
-      <PropertyGroup>
-        <HasBoost>true</HasBoost>
-      </PropertyGroup>
-    </When>
-    <Otherwise>
-      <PropertyGroup>
-        <HasBoost>false</HasBoost>
-      </PropertyGroup>
-    </Otherwise>
-  </Choose>
-  <Choose>
-    <When Condition="'$(Configuration)|$(Platform)'=='Debug_CpuOnly|x64' Or '$(Configuration)|$(Platform)'=='Release_CpuOnly|x64'">
-      <PropertyGroup>
-        <UsesCuda>false</UsesCuda>
-      </PropertyGroup>
-    </When>
-    <Otherwise>
-      <PropertyGroup>
-        <UsesCuda>true</UsesCuda>
-      </PropertyGroup>
-    </Otherwise>
-  </Choose>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64' Or '$(Configuration)|$(Platform)'=='Release_CpuOnly|x64'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
+  <PropertyGroup Condition="$(DebugBuild)" Label="Configuration">
+    <UseDebugLibraries>true</UseDebugLibraries>
+  </PropertyGroup>
+  <PropertyGroup Condition="$(ReleaseBuild)" Label="Configuration">
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v120</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
-    <CharacterSet>Unicode</CharacterSet>
-    <UseOfMfc>false</UseOfMfc>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings" />
-  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64' Or '$(Configuration)|$(Platform)'=='Debug_CpuOnly|x64'" Label="PropertySheets">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-  </ImportGroup>
-  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64' Or '$(Configuration)|$(Platform)'=='Release_CpuOnly|x64'" Label="PropertySheets">
+  <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64' Or '$(Configuration)|$(Platform)'=='Debug_CpuOnly|x64'">
+  <PropertyGroup>
     <LinkIncremental>false</LinkIncremental>
-    <IncludePath>..\..\..\Source\Common\include;..\..\..\Source\Math;$(IncludePath)</IncludePath>
+    <IncludePath>..\..\..\Source\Readers\Reader;..\..\..\Source\Common\include;..\..\..\Source\Math;$(IncludePath)</IncludePath>
     <LibraryPath>$(OutDir);$(LibraryPath)</LibraryPath>
-    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\UnitTests\</OutDir>
-    <IntDir>$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir>$(OutDir)\UnitTests\</OutDir>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64' Or '$(Configuration)|$(Platform)'=='Release_CpuOnly|x64'">
-    <LinkIncremental>false</LinkIncremental>
-    <IncludePath>..\..\..\Source\Common\include;..\..\..\Source\Math;$(IncludePath)</IncludePath>
-    <LibraryPath>$(OutDir);$(LibraryPath)</LibraryPath>
-    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\UnitTests\</OutDir>
-    <IntDir>$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
-  </PropertyGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64' Or '$(Configuration)|$(Platform)'=='Debug_CpuOnly|x64'">
+  <ItemDefinitionGroup>
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel>
-      <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>WIN32;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(BOOST_INCLUDE_PATH);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <PreprocessorDefinitions>WIN32;$(ImageReaderDefine);$(ZipDefine);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\..\Source\Readers\ReaderLib;$(BOOST_INCLUDE_PATH);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <UseFullPaths>true</UseFullPaths>
       <OpenMPSupport>true</OpenMPSupport>
-      <TreatWarningAsError>true</TreatWarningAsError>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(BOOST_LIB_PATH);$(OutDir)..\;</AdditionalLibraryDirectories>
-      <AdditionalDependencies>htkmlfreader.lib;Math.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>htkmlfreader.lib;experimentalhtkmlfreader.lib;Math.lib;ReaderLib.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64' Or '$(Configuration)|$(Platform)'=='Release_CpuOnly|x64'">
+  <ItemDefinitionGroup Condition="$(DebugBuild)">
     <ClCompile>
-      <WarningLevel>Level4</WarningLevel>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="$(ReleaseBuild)">
+    <ClCompile>
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>WIN32;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(BOOST_INCLUDE_PATH);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <UseFullPaths>true</UseFullPaths>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <TreatWarningAsError>true</TreatWarningAsError>
-      <OpenMPSupport>true</OpenMPSupport>
       <AdditionalOptions>/d2Zi+ %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
-      <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalLibraryDirectories>$(BOOST_LIB_PATH);$(OutDir)..\;</AdditionalLibraryDirectories>
-      <AdditionalDependencies>htkmlfreader.lib;Math.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="!$(UsesCuda)">
+  <ItemDefinitionGroup Condition="$(CpuOnlyBuild)">
     <ClCompile>
       <PreprocessorDefinitions>CPUONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
@@ -143,40 +111,49 @@
   <ItemGroup>
     <ClCompile Include="..\..\..\Source\Common\Config.cpp" />
     <ClCompile Include="..\..\..\Source\Common\DataReader.cpp" />
-    <ClCompile Include="..\..\..\Source\Common\DebugUtil.cpp" />
     <ClCompile Include="..\..\..\Source\Common\Eval.cpp" />
+    <ClCompile Include="..\..\..\Source\Common\ExceptionWithCallStack.cpp" />
     <ClCompile Include="..\..\..\Source\Common\File.cpp" />
     <ClCompile Include="..\..\..\Source\Common\fileutil.cpp" />
     <ClCompile Include="..\..\..\Source\Common\TimerUtility.cpp" />
+    <ClCompile Include="CNTKTextFormatReaderTests.cpp" />
     <ClCompile Include="HTKLMFReaderTests.cpp" />
+    <ClCompile Include="ImageReaderTests.cpp" />
+    <ClCompile Include="ReaderLibTests.cpp" />
     <ClCompile Include="stdafx.cpp">
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'  Or '$(Configuration)|$(Platform)'=='Debug_CpuOnly|x64'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64' Or '$(Configuration)|$(Platform)'=='Release_CpuOnly|x64'">Create</PrecompiledHeader>
+      <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="UCIFastReaderTests.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop10_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop11_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop12_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop13_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop14_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop16_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop17_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop19_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop1_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop20_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop21_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop22_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop2_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop3_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop4_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop5_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop6_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop7_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop8_Config.txt" />
-    <Text Include="Config\HTKMLFReaderSimpleDataLoop9_Config.txt" />
-    <Text Include="Config\UCIFastReaderSimpleDataLoop_Config.txt" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop10_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop11_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop12_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop13_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop14_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop16_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop17_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop19_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop1_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop20_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop21_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop22_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop2_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop3_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop4_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop5_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop6_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop7_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop8_Config.cntk" />
+    <Text Include="Config\HTKMLFReaderSimpleDataLoop9_Config.cntk" />
+    <Text Include="Config\ImageReaderSimple_Config.cntk" />
+    <Text Include="Config\UCIFastReaderSimpleDataLoop_Config.cntk" />
+    <Text Include="Control\CNTKTextFormatReader1x100_1_Control.txt" />
+    <Text Include="Control\CNTKTextFormatReader1x10_MI_1_Control.txt" />
+    <Text Include="Control\CNTKTextFormatReader1x10_MI_2_Control.txt" />
+    <Text Include="Control\CNTKTextFormatReader1x1_1_Control.txt" />
+    <Text Include="Control\CNTKTextFormatReaderMNIST_Control.txt" />
+    <Text Include="Control\CNTKTextFormatReaderSimple_Control.txt" />
     <Text Include="Control\HTKMLFReaderSimpleDataLoop10_20_Control.txt" />
     <Text Include="Control\HTKMLFReaderSimpleDataLoop1_5_11_Control.txt" />
     <Text Include="Control\HTKMLFReaderSimpleDataLoop21_0_Control.txt" />
@@ -188,19 +165,49 @@
     <Text Include="Control\HTKMLFReaderSimpleDataLoop6_16_17_Control.txt" />
     <Text Include="Control\HTKMLFReaderSimpleDataLoop7_Control.txt" />
     <Text Include="Control\HTKMLFReaderSimpleDataLoop9_19_Control.txt" />
+    <Text Include="Control\ImageReaderSimple_Control.txt" />
+    <Text Include="Control\ImageReaderZip_Control.txt" />
     <Text Include="Control\UCIFastReaderSimpleDataLoop_Control.txt" />
+    <Text Include="Data\CNTKTextFormatReader1x100_Train.txt" />
+    <Text Include="Data\CNTKTextFormatReader1x10_MI_Train.txt" />
+    <Text Include="Data\CNTKTextFormatReader1x1_Train.txt" />
+    <Text Include="Data\CNTKTextFormatReaderMNIST_Train.txt" />
+    <Text Include="Data\CNTKTextFormatReaderSimple_Train.txt" />
+    <Text Include="Data\ImageReaderSimple_map.txt" />
+    <Text Include="Data\ImageReaderZip_map.txt" />
     <Text Include="Data\UCIFastReaderSimpleDataLoop_Mapping.txt" />
     <Text Include="Data\UCIFastReaderSimpleDataLoop_Train.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="Data\images\black.jpg" />
+    <Image Include="Data\images\blue.jpg" />
+    <Image Include="Data\images\green.jpg" />
+    <Image Include="Data\images\red.jpg" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Config\CNTKTextFormatReader1x10_MI_Config.cntk" />
+    <None Include="Config\CNTKTextFormatReader1x100_Config.cntk" />
+    <None Include="Config\CNTKTextFormatReader1x1_Config.cntk" />
+    <None Include="Config\CNTKTextFormatReaderSimple_Config.cntk" />
+    <None Include="Config\CNTKTextFormatReaderMNIST_Config.cntk" />
+    <None Include="Config\ImageReaderZip_Config.cntk" />
+    <None Include="Data\images\chunk0.zip" />
+    <None Include="Data\images\chunk1.zip" />
+    <None Include="Data\images\simple.zip" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="Build" Condition="$(HasBoost)" Outputs="$(TargetPath)" DependsOnTargets="$(BuildDependsOn)" />
   <ImportGroup Label="ExtensionTargets" />
   <Target Name="CheckDependencies">
-    <Warning Condition="!$(HasBoost)" Text="ReaderTests requires Boost 1.59 to build. Skipping the build. Please download and install boost from http://sourceforge.net/projects/boost/files/boost-binaries/1.59.0/boost_1_59_0-msvc-12.0-64.exe/download and set BOOST_INCLUDE_PATH environment variable to the &quot;&lt;boost install folder&gt;\boost_1_59_0&quot; directory and BOOST_LIB_PATH to the &quot;&lt;boost install folder&gt;\boost_1_59_0\lib64-msvc-12.0&quot; directory." />
+    <Warning Condition="!$(HasBoost)" Text="ReaderTests requires the Boost library to build. Please see https://github.com/Microsoft/CNTK/wiki/Setup-CNTK-on-Windows#boost for installation instructions." />
   </Target>
+  <PropertyGroup Condition="$(HasOpenCV)">
+    <ImageReaderDependencies>$(OutDir)..\ImageReader.dll;$(OPENCV_PATH)\x64\vc12\bin\opencv_world300.dll</ImageReaderDependencies>
+    <ImageReaderDependencies Condition="$(UseZip)">$(ImageReaderDependencies);$(OutDir)..\zip.dll;$(OutDir)..\zlib1.dll</ImageReaderDependencies>
+  </PropertyGroup>
   <Target Name="CopyUnitTestDependencies" AfterTargets="Build">
     <ItemGroup>
-      <UnitTestDependencies Include="$(OutDir)..\Math.dll;$(OutDir)..\ucifastreader.dll;$(OutDir)..\htkmlfreader.dll;$(OutDir)..\libacml_mp_dll.dll;$(OutDir)..\libifcoremd.dll;$(OutDir)..\libifportmd.dll;$(OutDir)..\libiomp*.dll;$(OutDir)..\libmmd.dll;$(OutDir)..\svml_dispmd.dll;" />
+      <UnitTestDependencies Include="$(OutDir)..\Math.dll;$(OutDir)..\ucifastreader.dll;$(OutDir)..\cntktextformatreader.dll;$(OutDir)..\htkmlfreader.dll;$(OutDir)..\experimentalhtkmlfreader.dll;$(OutDir)..\libacml_mp_dll.dll;$(OutDir)..\libifcoremd.dll;$(OutDir)..\libifportmd.dll;$(OutDir)..\libiomp*.dll;$(OutDir)..\libmmd.dll;$(OutDir)..\svml_dispmd.dll;$(ImageReaderDependencies);" />
     </ItemGroup>
     <Copy SourceFiles="@(UnitTestDependencies)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true">
       <Output TaskParameter="DestinationFiles" ItemName="NewFileWrites" />

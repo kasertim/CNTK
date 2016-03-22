@@ -16,7 +16,6 @@
 #include "DataWriter.h"
 #include "SimpleNetworkBuilder.h"
 #include "NDLNetworkBuilder.h"
-#include "SynchronousExecutionEngine.h"
 #include "ModelEditLanguage.h"
 #include "CPUMatrix.h" // used for SetNumThreads()
 #include "CommonMatrix.h"
@@ -37,6 +36,9 @@
 #include <algorithm>
 #if defined(_WIN32)
 #include "io.h"
+#include <DelayImp.h>
+#pragma comment(lib, "Delayimp.lib")
+#pragma comment(lib, "shlwapi.lib")
 #endif
 #include "buildinfo.h"
 #include "hostname.h"
@@ -52,9 +54,6 @@
 #ifndef let
 #define let const auto
 #endif
-
-// TODO: Get rid of these globals
-Microsoft::MSR::CNTK::MPIWrapper* g_mpi = nullptr;
 
 // TODO: Temporary mechanism to enable memory sharing for
 // node output value matrices. This will go away when the
@@ -89,6 +88,7 @@ std::string WCharToString(const wchar_t* wst)
     return s;
 }
 
+// TODO: This is an action, it should be moved into ActionsLib.
 template <typename ElemType>
 void DumpNodeInfo(const ConfigParameters& config)
 {
@@ -98,10 +98,15 @@ void DumpNodeInfo(const ConfigParameters& config)
     wstring defOutFilePath = modelPath + L"." + nodeName + L".txt";
     wstring outputFile = config(L"outputFile", defOutFilePath);
     bool printValues = config(L"printValues", true);
+    bool printMetadata = config(L"printMetadata", true);
+    if (!printValues && !printMetadata)
+    {
+        InvalidArgument("printValues and printMetadata: Since both are set to false, there will be nothing to dump");
+    }
 
-    ComputationNetwork net(-1); // always use CPU
-    net.Load<ElemType>(modelPath);
-    net.DumpNodeInfoToFile(nodeName, printValues, outputFile, nodeNameRegexStr);
+    ComputationNetwork net(-1);    // always use CPU
+    net.Load<ElemType>(modelPath); // TODO: we have a function now to combine this and the previous line
+    net.DumpNodeInfoToFile(nodeName, printValues, printMetadata, outputFile, nodeNameRegexStr);
 }
 
 size_t GetMaxEpochs(const ConfigParameters& configParams)
@@ -145,9 +150,13 @@ static void DisableLegacyUsage(const ConfigParameters& TopLevelConfig, const Con
     }
 }
 
+// When running in parallel with MPI, only commands in 'commandstoRunOnAllRanks' should
+// be run in parallel across multiple ranks. Others should only run on rank 0
+const std::set<std::string> commandstoRunOnAllRanks = { "train", "trainRNN", "adapt", "test", "eval", "cv", "devtest" };
+
 // process the command
 template <typename ElemType>
-void DoCommands(const ConfigParameters& config)
+void DoCommands(const ConfigParameters& config, const shared_ptr<MPIWrapper>& mpi)
 {
     ConfigArray command = config(L"command", "train");
 
@@ -156,12 +165,12 @@ void DoCommands(const ConfigParameters& config)
 
     if (numCPUThreads > 0)
     {
-        std::cerr << "Using " << numCPUThreads << " CPU threads" << endl;
+        std::cerr << "Using " << numCPUThreads << " CPU threads." << endl;
     }
 
     bool progressTracing = config(L"progressTracing", false);
 
-    // temporary hack to prevent users from failling for a small breaking change related to the "truncated" flag (will be redone bigger and better some day)
+    // temporary hack to prevent users from failing due to a small breaking change related to the "truncated" flag (will be redone bigger and better some day)
     DisableLegacyUsage(config, command);
 
     // summarize command info upfront in the log and stdout
@@ -188,8 +197,9 @@ void DoCommands(const ConfigParameters& config)
     std::cerr << "CNTKCommandTrainInfo: CNTKNoMoreCommands_Total : " << fullTotalMaxEpochs << endl;
 
     // set up progress tracing for compute cluster management
-    if (progressTracing && ((g_mpi == nullptr) || g_mpi->IsMainNode()))
+    if (progressTracing && ((mpi == nullptr) || mpi->IsMainNode()))
     {
+        ProgressTracing::SetTracingFlag();
         ProgressTracing::TraceTotalNumberOfSteps(fullTotalMaxEpochs); // enable tracing, using this as the total number of epochs
     }
 
@@ -202,7 +212,7 @@ void DoCommands(const ConfigParameters& config)
         ConfigParameters commandParams(config(command[i]));
         ConfigArray action = commandParams("action", "train");
 
-        if (progressTracing && ((g_mpi == nullptr) || g_mpi->IsMainNode()))
+        if (progressTracing && ((mpi == nullptr) || mpi->IsMainNode()))
         {
             ProgressTracing::SetStepOffset(fullEpochsOffset); // this is the epoch number that SGD will log relative to
         }
@@ -210,68 +220,92 @@ void DoCommands(const ConfigParameters& config)
         // determine the action to perform, and do it
         for (int j = 0; j < action.size(); j++)
         {
-            if (action[j] == "train" || action[j] == "trainRNN")
+            string thisAction = action[j];
+
+            // print a banner to visually separate each action in the log
+            const char* delim = "##############################################################################";
+            const char* prefix = "Action ";
+            fprintf(stderr, "\n%s\n", delim);
+            fprintf(stderr, "#%*s#\n", (int)(strlen(delim) - 2), "");
+            fprintf(stderr, "# %s\"%s\"%*s #\n", prefix, thisAction.c_str(), (int)(strlen(delim) - strlen(prefix) - thisAction.size() - 6), "");
+            fprintf(stderr, "#%*s#\n", (int)(strlen(delim) - 2), "");
+            fprintf(stderr, "%s\n\n", delim);
+
+            if ((mpi == nullptr) || (commandstoRunOnAllRanks.find(thisAction) != commandstoRunOnAllRanks.end()) || mpi->IsMainNode())
             {
-                std::cerr << "CNTKCommandTrainBegin: " + command[i] << endl;
-                DoTrain<ConfigParameters, ElemType>(commandParams);
-                std::cerr << "CNTKCommandTrainEnd: " + command[i] << endl;
-                fullEpochsOffset += GetMaxEpochs(commandParams);
+                if (thisAction == "train" || thisAction == "trainRNN")
+                {
+                    std::cerr << "CNTKCommandTrainBegin: " + command[i] << endl;
+                    DoTrain<ConfigParameters, ElemType>(commandParams);
+                    std::cerr << "CNTKCommandTrainEnd: " + command[i] << endl;
+                    fullEpochsOffset += GetMaxEpochs(commandParams);
+                }
+                else if (thisAction == "adapt")
+                {
+                    DoAdapt<ElemType>(commandParams);
+                }
+                else if (thisAction == "test" || thisAction == "eval")
+                {
+                    DoEval<ElemType>(commandParams);
+                }
+                else if (thisAction == "edit")
+                {
+                    DoEdit<ElemType>(commandParams);
+                }
+                else if (thisAction == "cv")
+                {
+                    DoCrossValidate<ElemType>(commandParams);
+                }
+                else if (thisAction == "write")
+                {
+                    DoWriteOutput<ElemType>(commandParams);
+                }
+                else if (thisAction == "devtest")
+                {
+                    TestCn<ElemType>(config); // for "devtest" action pass the root config instead
+                }
+                else if (thisAction == "dumpnode")
+                {
+                    DumpNodeInfo<ElemType>(commandParams);
+                }
+                else if (thisAction == "convertdbn")
+                {
+                    DoConvertFromDbn<ElemType>(commandParams);
+                }
+                else if (thisAction == "exportdbn")
+                {
+                    DoExportToDbn<ElemType>(commandParams);
+                }
+                else if (thisAction == "createLabelMap")
+                {
+                    DoCreateLabelMap<ElemType>(commandParams);
+                }
+                else if (thisAction == "writeWordAndClass")
+                {
+                    DoWriteWordAndClassInfo<ElemType>(commandParams);
+                }
+                else if (thisAction == "plot")
+                {
+                    DoTopologyPlot<ElemType>(commandParams);
+                }
+                else if (thisAction == "SVD")
+                {
+                    DoParameterSVD<ElemType>(commandParams);
+                }
+                else
+                {
+                    RuntimeError("unknown action: %s  in command set: %s", thisAction.c_str(), command[i].c_str());
+                }
             }
-            else if (action[j] == "adapt")
-            {
-                DoAdapt<ElemType>(commandParams);
-            }
-            else if (action[j] == "test" || action[j] == "eval")
-            {
-                DoEval<ElemType>(commandParams);
-            }
-            else if (action[j] == "edit")
-            {
-                DoEdit<ElemType>(commandParams);
-            }
-            else if (action[j] == "cv")
-            {
-                DoCrossValidate<ElemType>(commandParams);
-            }
-            else if (action[j] == "write")
-            {
-                DoWriteOutput<ElemType>(commandParams);
-            }
-            else if (action[j] == "devtest")
-            {
-                TestCn<ElemType>(config); // for "devtest" action pass the root config instead
-            }
-            else if (action[j] == "dumpnode")
-            {
-                DumpNodeInfo<ElemType>(commandParams);
-            }
-            else if (action[j] == "convertdbn")
-            {
-                DoConvertFromDbn<ElemType>(commandParams);
-            }
-            else if (action[j] == "createLabelMap")
-            {
-                DoCreateLabelMap<ElemType>(commandParams);
-            }
-            else if (action[j] == "writeWordAndClass")
-            {
-                DoWriteWordAndClassInfo<ElemType>(commandParams);
-            }
-            else if (action[j] == "plot")
-            {
-                DoTopologyPlot<ElemType>(commandParams);
-            }
-            else if (action[j] == "SVD")
-            {
-                DoParameterSVD<ElemType>(commandParams);
-            }
-            else
-            {
-                RuntimeError("unknown action: %s  in command set: %s", action[j].c_str(), command[i].c_str());
-            }
+
+            fprintf(stderr, "\nAction \"%s\" complete.\n\n", thisAction.c_str());
 
             NDLScript<ElemType> ndlScript;
             ndlScript.ClearGlobal(); // clear global macros between commands
+
+            // Synchronize all ranks before proceeding to next action/command
+            if (mpi != nullptr)
+                mpi->WaitAll();
         }
     }
 }
@@ -293,6 +327,12 @@ void PrintBuiltInfo()
     fprintf(stderr, "\t\tLast modified date: %s\n", __TIMESTAMP__);
 #ifdef _BUILDTYPE_
     fprintf(stderr, "\t\tBuild type: %s\n", _BUILDTYPE_);
+#endif
+#ifdef _BUILDTARGET_
+    fprintf(stderr, "\t\tBuild target: %s\n", _BUILDTARGET_);
+#endif
+#ifdef _WITH_1BITSGD_
+    fprintf(stderr, "\t\tWith 1bit-SGD: %s\n", _WITH_1BITSGD_);
 #endif
 #ifdef _MATHLIB_
     fprintf(stderr, "\t\tMath lib: %s\n", _MATHLIB_);
@@ -358,9 +398,9 @@ static wstring PathToBSStringLiteral(const wstring& path) // quote a pathname fo
 }
 
 // TODO: decide where these should go. Also, do we need three variables?
-extern wstring standardFunctions;
-extern wstring commonMacros;
-extern wstring computationNodes;
+//extern wstring standardFunctions;
+//extern wstring commonMacros;
+//extern wstring computationNodes;
 
 int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapper that catches & reports Win32 exceptions
 {
@@ -372,7 +412,7 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
     wstring startupMessage = msra::strfun::wstrprintf(L"running on %ls at %ls\n", msra::strfun::utf16(GetHostName()).c_str(), msra::strfun::utf16(TimeDateStamp()).c_str());
     startupMessage += msra::strfun::wstrprintf(L"command line: %ls", exePath.c_str());
     for (const auto& arg : args)
-        startupMessage += L" " + arg;
+        startupMessage += L"  " + arg;
 
     fprintf(stderr, "%ls\n", startupMessage.c_str());
 
@@ -402,7 +442,9 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
 
     // compile the BrainScript
     wstring bs = L"[\n";
-    bs += standardFunctions + computationNodes + commonMacros + L"\n"; // start with standard macros
+    bs += L"include \'cntk.core.bs'"; // start with including the standard macros
+    // Note: Using lowercase ^^ here to match the Linux name of the CNTK exe.
+    //bs += standardFunctions + computationNodes + commonMacros + L"\n";
     for (const auto& sourceFile : sourceFiles)
         bs += L"include " + PathToBSStringLiteral(sourceFile) + L"\n";
     bs += L"\n]\n";
@@ -424,10 +466,10 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
         InvalidArgument("Legacy name 'type' no longer allowed. Use 'precision'.");
 
     // parallel training
-    g_mpi = nullptr;
+    shared_ptr<Microsoft::MSR::CNTK::MPIWrapper> mpi;
     bool paralleltrain = config(L"parallelTrain", false);
     if (paralleltrain)
-        g_mpi = new MPIWrapper();
+        mpi = MPIWrapper::GetInstance(true /*create*/);
 
     g_shareNodeValueMatrices = config(L"shareNodeValueMatrices", false);
 
@@ -441,7 +483,7 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
         logpath += L".log";     // TODO: why do we need to append this here?
 
         if (paralleltrain)
-            logpath += msra::strfun::wstrprintf(L"rank%d", (int) g_mpi->CurrentNodeRank());
+            logpath += msra::strfun::wstrprintf(L"rank%d", (int) mpi->CurrentNodeRank());
 
         RedirectStdErr(logpath);
         fprintf(stderr, "%ls\n", startupMessage.c_str());
@@ -460,7 +502,7 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
     bool progressTracing = config(L"progressTracing", false);
     size_t fullTotalMaxEpochs = 1; // BUGBUG: BS does not allow me to read out the max epochs parameters, as that would instantiate and thus execute the objects
     // set up progress tracing for compute cluster management
-    if (progressTracing && ((g_mpi == nullptr) || g_mpi->IsMainNode()))
+    if (progressTracing && ((mpi == nullptr) || mpi->IsMainNode()))
         ProgressTracing::TraceTotalNumberOfSteps(fullTotalMaxEpochs); // enable tracing, using this as the total number of epochs
 
     // MAIN LOOP that executes the actions
@@ -473,6 +515,8 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
         const ScriptableObjects::ConfigArray& actions = actionsVal;
         for (int i = actions.GetIndexRange().first; i <= actions.GetIndexRange().second; i++)
         {
+            // TODO: When running in parallel with MPI, only commands in 'commandstoRunOnAllRanks' should
+            // be run in parallel across multiple ranks. Others should only run on rank 0
             actions.At(i, [](const wstring&)
                        {
                        }); // this will evaluate and thus execute the action
@@ -490,7 +534,7 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
     }
     fprintf(stderr, "COMPLETED\n"), fflush(stderr);
 
-    delete g_mpi;
+    MPIWrapper::DeleteInstance();
     return EXIT_SUCCESS;
 }
 
@@ -511,12 +555,10 @@ int wmainOldCNTKConfig(int argc, wchar_t* argv[]) // called from wmain which is 
     ConfigArray command = config(L"command", "train");
 
     // paralleltrain training
-    g_mpi = nullptr;
+    shared_ptr<Microsoft::MSR::CNTK::MPIWrapper> mpi;
     bool paralleltrain = config(L"parallelTrain", "false");
     if (paralleltrain)
-    {
-        g_mpi = new MPIWrapper();
-    }
+        mpi = MPIWrapper::GetInstance(true /*create*/);
 
     g_shareNodeValueMatrices = config(L"shareNodeValueMatrices", false);
 
@@ -534,7 +576,7 @@ int wmainOldCNTKConfig(int argc, wchar_t* argv[]) // called from wmain which is 
         if (paralleltrain)
         {
             std::wostringstream oss;
-            oss << g_mpi->CurrentNodeRank();
+            oss << mpi->CurrentNodeRank();
             logpath += L"rank" + oss.str();
         }
         RedirectStdErr(logpath);
@@ -544,13 +586,13 @@ int wmainOldCNTKConfig(int argc, wchar_t* argv[]) // called from wmain which is 
     std::string timestamp = TimeDateStamp();
 
     // dump config info
-    fprintf(stderr, "running on %s at %s\n", GetHostName().c_str(), timestamp.c_str());
-    fprintf(stderr, "command line: \n");
+    fprintf(stderr, "\nRunning on %s at %s\n", GetHostName().c_str(), timestamp.c_str());
+    fprintf(stderr, "Command line: \n");
     for (int i = 0; i < argc; i++)
-    {
-        fprintf(stderr, "%s ", WCharToString(argv[i]).c_str());
-    }
+        fprintf(stderr, "%*s%ls", i > 0 ? 2 : 0, "", argv[i]); // use 2 spaces for better visual separability
+    fprintf(stderr, "\n\n");
 
+#if 1 //def _DEBUG
     // This simply merges all the different config parameters specified (eg, via config files or via command line directly),
     // and prints it.
     fprintf(stderr, "\n\n>>>>>>>>>>>>>>>>>>>> RAW CONFIG (VARIABLES NOT RESOLVED) >>>>>>>>>>>>>>>>>>>>\n");
@@ -568,36 +610,28 @@ int wmainOldCNTKConfig(int argc, wchar_t* argv[]) // called from wmain which is 
     fprintf(stderr, "\n>>>>>>>>>>>>>>>>>>>> PROCESSED CONFIG WITH ALL VARIABLES RESOLVED >>>>>>>>>>>>>>>>>>>>\n");
     config.dumpWithResolvedVariables();
     fprintf(stderr, "<<<<<<<<<<<<<<<<<<<< PROCESSED CONFIG WITH ALL VARIABLES RESOLVED <<<<<<<<<<<<<<<<<<<<\n");
+#endif
 
-    fprintf(stderr, "command: ");
+    fprintf(stderr, "Commands:");
     for (int i = 0; i < command.size(); i++)
-    {
-        fprintf(stderr, "%s ", command[i].c_str());
-    }
+        fprintf(stderr, " %s", command[i].c_str());
+    fprintf(stderr, "\n");
 
     // run commands
     std::string type = config(L"precision", "float");
     // accept old precision key for backward compatibility
     if (config.Exists("type"))
-    {
-        type = config(L"type", "float");
-    }
+        InvalidArgument("CNTK: Use of 'type' parameter is deprecated, it is called 'precision' now.");
 
-    fprintf(stderr, "\nprecision = %s\n", type.c_str());
+    fprintf(stderr, "Precision = \"%s\"\n", type.c_str());
     if (type == "float")
-    {
-        DoCommands<float>(config);
-    }
+        DoCommands<float>(config, mpi);
     else if (type == "double")
-    {
-        DoCommands<double>(config);
-    }
+        DoCommands<double>(config, mpi);
     else
-    {
-        RuntimeError("invalid precision specified: %s", type.c_str());
-    }
+        RuntimeError("CNTK: Invalid precision string: \"%s\", must be \"float\" or \"double\"", type.c_str());
 
-    // still here , write a DoneFile if necessary
+    // if completed then write a DoneFile if requested
     if (!DoneFile.empty())
     {
         FILE* fp = fopenOrDie(DoneFile.c_str(), L"w");
@@ -606,8 +640,16 @@ int wmainOldCNTKConfig(int argc, wchar_t* argv[]) // called from wmain which is 
     }
     fprintf(stderr, "COMPLETED\n"), fflush(stderr);
 
-    delete g_mpi;
+    MPIWrapper::DeleteInstance();
     return EXIT_SUCCESS;
+}
+
+// new_handler to print call stack upon allocation failure
+void AllocationFailureHandler()
+{
+    Microsoft::MSR::CNTK::DebugUtil::PrintCallStack();
+    std::set_new_handler(nullptr);
+    throw std::bad_alloc();
 }
 
 // ---------------------------------------------------------------------------
@@ -616,11 +658,16 @@ int wmainOldCNTKConfig(int argc, wchar_t* argv[]) // called from wmain which is 
 
 int wmain1(int argc, wchar_t* argv[]) // called from wmain which is a wrapper that catches & reports Win32 exceptions
 {
+    std::set_new_handler(AllocationFailureHandler);
     try
     {
         PrintBuiltInfo(); // print build info directly in case that user provides zero argument (convenient for checking build type)
         if (argc <= 1)
-            InvalidArgument("No command-line argument given.");
+        {
+            fprintf(stderr, "No command-line argument given.\n");
+            PrintUsageInfo();
+            return EXIT_FAILURE;
+        }
         // detect legacy CNTK configuration
         bool isOldCNTKConfig = false;
         for (int i = 0; i < argc && !isOldCNTKConfig; i++)
@@ -632,34 +679,48 @@ int wmain1(int argc, wchar_t* argv[]) // called from wmain which is a wrapper th
     }
     catch (const ScriptableObjects::ScriptingException& err)
     {
-        fprintf(stderr, "EXCEPTION occurred: %s\n", err.what());
+        fprintf(stderr, "\nEXCEPTION occurred: %s\n", err.what());
         err.PrintError();
+        return EXIT_FAILURE;
+    }
+    catch (const IExceptionWithCallStackBase& err)
+    {
+        fprintf(stderr, "\nEXCEPTION occurred: %s\n%s", dynamic_cast<const std::exception&>(err).what(), err.CallStack());
         return EXIT_FAILURE;
     }
     catch (const std::exception& err)
     {
-        fprintf(stderr, "EXCEPTION occurred: %s\n", err.what());
-        PrintUsageInfo();
+        fprintf(stderr, "\nEXCEPTION occurred: %s\n", err.what());
         return EXIT_FAILURE;
     }
     catch (...)
     {
-        fprintf(stderr, "Unknown ERROR occurred");
-        PrintUsageInfo();
+        fprintf(stderr, "\nUnknown ERROR occurred\n");
         return EXIT_FAILURE;
     }
 }
 
 #ifdef __WINDOWS__
-void terminate_this()
+void TerminateThis()
 {
     fprintf(stderr, "terminate_this: aborting\n"), fflush(stderr);
     exit(EXIT_FAILURE);
 }
 
+#define EXCEPTION_DLL_NOT_FOUND VcppException(ERROR_SEVERITY_ERROR, ERROR_MOD_NOT_FOUND)
+
+static void LogDelayLoadError(PEXCEPTION_POINTERS pExcPointers)
+{
+    if (pExcPointers->ExceptionRecord->ExceptionCode == EXCEPTION_DLL_NOT_FOUND)
+    {
+        const auto & pDelayLoadInfo = *PDelayLoadInfo(pExcPointers->ExceptionRecord->ExceptionInformation[0]);
+        fprintf(stderr, "CNTK: Failed to load DLL '%s'.\n", pDelayLoadInfo.szDll);
+    }
+}
+
 int wmain(int argc, wchar_t* argv[]) // wmain wrapper that reports Win32 exceptions
 {
-    set_terminate(terminate_this);   // insert a termination handler to ensure stderr gets flushed before actually terminating
+    set_terminate(TerminateThis);    // insert a termination handler to ensure stderr gets flushed before actually terminating
     _set_error_mode(_OUT_TO_STDERR); // make sure there are no CRT prompts when CNTK is executing
 
     // Note: this does not seem to work--processes with this seem to just hang instead of terminating
@@ -667,9 +728,15 @@ int wmain(int argc, wchar_t* argv[]) // wmain wrapper that reports Win32 excepti
     {
         return wmain1(argc, argv);
     }
-    __except (1 /*EXCEPTION_EXECUTE_HANDLER, see excpt.h--not using constant to avoid Windows header in here*/)
+    __except (LogDelayLoadError(GetExceptionInformation()), EXCEPTION_EXECUTE_HANDLER)
     {
-        fprintf(stderr, "CNTK: Win32 exception caught (such an access violation or a stack overflow)\n"); // TODO: separate out these two into a separate message
+        auto code = GetExceptionCode();
+        const char * msg = "";
+        if      (code == EXCEPTION_ACCESS_VIOLATION)   msg = ": Access violation"; // the famous 0xc0000005 error
+        else if (code == EXCEPTION_INT_DIVIDE_BY_ZERO) msg = ": Integer division by zero";
+        else if (code == EXCEPTION_STACK_OVERFLOW)     msg = ": Stack overflow";
+        else if (code == EXCEPTION_DLL_NOT_FOUND)      msg = ": Module not found";
+        fprintf(stderr, "CNTK: Caught Win32 exception 0x%08x%s.\n", (unsigned int)code, msg);
         fflush(stderr);
         exit(EXIT_FAILURE);
     }

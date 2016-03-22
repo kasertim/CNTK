@@ -35,10 +35,8 @@ class MATH_API CPUMatrix : public BaseMatrix<ElemType>
     using B::m_elemSizeAllocated;
     using B::m_externalBuffer;
     using B::m_format;
-    using B::m_matrixName; // without this, base members would require to use thi-> in GCC
 public:
     CPUMatrix();
-    CPUMatrix(FILE* f, const char* matrixName); // matrixName is used to verify that correct matrix is read.
     CPUMatrix(const size_t numRows, const size_t numCols);
     CPUMatrix(const size_t numRows, const size_t numCols, ElemType* pArray, const size_t matrixFlags = matrixFlagNormal);
     CPUMatrix(const CPUMatrix<ElemType>& deepCopyFrom);                      // copy constructor, deep copy
@@ -55,7 +53,7 @@ public:
     using B::GetNumRows;
     using B::GetNumCols;
     using B::SetOwnBuffer;
-    using B::SetMatrixName;
+    using B::VerifySize;
 
     size_t BufferSize() const
     {
@@ -123,35 +121,38 @@ public:
     CPUMatrix<ElemType> Transpose();
     CPUMatrix<ElemType>& AssignTransposeOf(const CPUMatrix<ElemType>& a);
 
+    CPUMatrix<ElemType>& DoGatherColumnsOf (ElemType beta, const CPUMatrix<ElemType>& m, const CPUMatrix<ElemType>& a, ElemType alpha);
+    CPUMatrix<ElemType>& DoScatterColumnsOf(ElemType beta, const CPUMatrix<ElemType>& m, const CPUMatrix<ElemType>& a, ElemType alpha);
+
     CPUMatrix<ElemType>& operator+=(const ElemType alpha);
-    CPUMatrix<ElemType> operator+(const ElemType alpha) const;
+    CPUMatrix<ElemType>  operator+(const ElemType alpha) const;
     CPUMatrix<ElemType>& AssignSumOf(const ElemType alpha, const CPUMatrix<ElemType>& a);
 
     CPUMatrix<ElemType>& operator+=(const CPUMatrix<ElemType>& a);
-    CPUMatrix<ElemType> operator+(const CPUMatrix<ElemType>& a) const;
+    CPUMatrix<ElemType>  operator+(const CPUMatrix<ElemType>& a) const;
     CPUMatrix<ElemType>& AssignSumOf(const CPUMatrix<ElemType>& a, const CPUMatrix<ElemType>& b);
 
     CPUMatrix<ElemType>& operator-=(const ElemType alpha);
-    CPUMatrix<ElemType> operator-(const ElemType alpha) const;
+    CPUMatrix<ElemType>  operator-(const ElemType alpha) const;
     CPUMatrix<ElemType>& AssignDifferenceOf(const ElemType alpha, const CPUMatrix<ElemType>& a);
     CPUMatrix<ElemType>& AssignDifferenceOf(const CPUMatrix<ElemType>& a, const ElemType alpha);
 
     CPUMatrix<ElemType>& operator-=(const CPUMatrix<ElemType>& a);
-    CPUMatrix<ElemType> operator-(const CPUMatrix<ElemType>& a) const;
+    CPUMatrix<ElemType>  operator-(const CPUMatrix<ElemType>& a) const;
     CPUMatrix<ElemType>& AssignDifferenceOf(const CPUMatrix<ElemType>& a, const CPUMatrix<ElemType>& b);
 
     CPUMatrix<ElemType>& operator*=(const ElemType alpha);
-    CPUMatrix<ElemType> operator*(const ElemType alpha) const;
+    CPUMatrix<ElemType>  operator*(const ElemType alpha) const;
     CPUMatrix<ElemType>& AssignProductOf(const ElemType alpha, const CPUMatrix<ElemType>& a);
 
-    CPUMatrix<ElemType> operator*(const CPUMatrix<ElemType>& a) const;
+    CPUMatrix<ElemType>  operator*(const CPUMatrix<ElemType>& a) const;
     CPUMatrix<ElemType>& AssignProductOf(const CPUMatrix<ElemType>& a, const bool transposeA, const CPUMatrix<ElemType>& b, const bool transposeB);
 
     CPUMatrix<ElemType>& operator/=(ElemType alpha);
-    CPUMatrix<ElemType> operator/(ElemType alpha) const;
+    CPUMatrix<ElemType>  operator/(ElemType alpha) const;
 
     CPUMatrix<ElemType>& operator^=(ElemType alpha);     // element-wise power
-    CPUMatrix<ElemType> operator^(ElemType alpha) const; // element-wise power
+    CPUMatrix<ElemType>  operator^(ElemType alpha) const; // element-wise power
     CPUMatrix<ElemType>& AssignElementPowerOf(const CPUMatrix<ElemType>& a, const ElemType power);
 
     CPUMatrix<ElemType>& ElementMultiplyWith(const CPUMatrix<ElemType>& a);
@@ -281,7 +282,7 @@ public:
 
     CPUMatrix<ElemType>& AssignNumOfDiff(const CPUMatrix<ElemType>& a, const CPUMatrix<ElemType>& b, bool searchInCol = false);
 
-    void Print(const char* matrixName, size_t rowStart, size_t rowEnd, size_t colStart, size_t colEnd) const;
+    void Print(const char* matrixName, ptrdiff_t rowStart, ptrdiff_t rowEnd, ptrdiff_t colStart, ptrdiff_t colEnd) const;
     void Print(const char* matrixName = nullptr) const; // print whole matrix. can be expensive
 
     void ReadFromFile(FILE* f, const char* matrixName); // matrixName is used to verify that correct matrix is read.
@@ -398,10 +399,6 @@ public:
             stream >> d_array[i];
         stream.GetMarker(fileMarkerEndSection, std::wstring(L"EMAT"));
         us.SetValue(numRows, numCols, d_array, matrixFlagNormal);
-        if (us.m_matrixName)
-            delete[] us.m_matrixName;
-        us.m_matrixName = new wchar_t[matrixName.length() + 1];
-        wmemcpy(us.m_matrixName, matrixName.c_str(), matrixName.length() + 1);
 
         delete[] d_array;
         return stream;
@@ -411,7 +408,7 @@ public:
         stream.PutMarker(fileMarkerBeginSection, std::wstring(L"BMAT"));
         stream << sizeof(ElemType);
 
-        std::wstring s = (us.m_matrixName == NULL) ? std::wstring(L"unnamed") : std::wstring(us.m_matrixName);
+        std::wstring s = std::wstring(L"unnamed");
         int format = us.m_format;
         stream << s << format;
 

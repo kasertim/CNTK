@@ -12,6 +12,7 @@
 
 #include "ComputationNode.h"
 #include "ScriptableObjects.h"
+#include "ComputationEnvironment.h"
 
 #include <map>
 #include <string>
@@ -26,6 +27,7 @@
 #include <regex>
 #include <chrono>
 #include <unordered_map>
+#include <set>
 
 namespace Microsoft { namespace MSR { namespace CNTK {
 
@@ -42,10 +44,12 @@ public:
     // construction
     // -----------------------------------------------------------------------
 
-    ComputationNetwork()
-        : m_randomSeedOffset(0),
+    ComputationNetwork() :
+        m_randomSeedOffset(0),
           m_isCompiled(false),
-          m_pMBLayout(make_shared<MBLayout>())
+          m_areMatricesAllocated(false),
+        m_pMBLayout(make_shared<MBLayout>()),
+        m_environment(make_shared<ComputationEnvironment>())
     {
     }
     ComputationNetwork(DEVICEID_TYPE deviceId)
@@ -65,10 +69,7 @@ public:
 
     void SetDeviceId(DEVICEID_TYPE deviceId)
     {
-        if (deviceId == AUTOPLACEMATRIX)
-            deviceId = Matrix<float>::GetBestGPUDeviceId();
         m_deviceId = deviceId;
-        m_deviceId = EnforceOneGPUOnly(m_deviceId); // see EnforceOneGPUOnly() for comment on what this is
     }
 
     DEVICEID_TYPE GetDeviceId() const { return m_deviceId; }
@@ -88,26 +89,22 @@ public:
     }
     // design BUGBUG: binary files do not know whether they are float or double.
     // TODO: modify file format to know this; then eliminate the <ElemType> dependency (and in some future, allow nodes to be different)
-    template <class ElemType>
-    void Read(const std::wstring& fileName, const FileOptions fileFormat = FileOptions::fileOptionsBinary,
-              const bool bAllowNoCriterionNode = false, ComputationNetwork* anotherNetwork = nullptr);
-    template <class ElemType>
-    void Load(const std::wstring& fileName, const FileOptions fileFormat = FileOptions::fileOptionsBinary,
-              const bool bAllowNoCriterionNode = false, ComputationNetwork* anotherNetwork = nullptr)
+    template <class ElemType> void Read(const std::wstring& fileName);
+    template <class ElemType> void Load(const std::wstring& fileName)
     {
-        Read<ElemType>(fileName, fileFormat, bAllowNoCriterionNode, anotherNetwork);
+        Read<ElemType>(fileName);
         // perform all further post-processing, caching, etc.
         CompileNetwork();
+        // To ensure that all the BN nodes changed to eval mode unless it's in Training mode.
+        SetBatchNormalizationNodesBelowEvalMode(true);
     }
 
     // static helper to instantiate a network from a file
     template <class ElemType>
-    static ComputationNetworkPtr CreateFromFile(DEVICEID_TYPE deviceId, const std::wstring& fileName,
-                                                const FileOptions fileFormat = FileOptions::fileOptionsBinary,
-                                                const bool bAllowNoCriterionNode = false, ComputationNetwork* anotherNetwork = nullptr)
+    static ComputationNetworkPtr CreateFromFile(DEVICEID_TYPE deviceId, const std::wstring& fileName)
     {
         auto net = make_shared<ComputationNetwork>(deviceId);
-        net->Load<ElemType>(fileName, FileOptions::fileOptionsBinary, bAllowNoCriterionNode, anotherNetwork);
+        net->Load<ElemType>(fileName);
         return net;
     }
 
@@ -165,23 +162,19 @@ public:
 
     void CompileNetwork(); // call this after creation, Load(), and any modification
 
-    // void ValidateNetwork(bool allowFragment = false, const bool bAllowNoCriterion = false);
-    // prepares the network for computation
-    // void BuildAndValidateSubNetwork(const ComputationNodeBasePtr rootNode);
 private:
-    void ValidateNodes(list<ComputationNodeBasePtr> nodes, bool isFinalValidationPass, size_t& todo);
-    void ValidateSubNetwork(const ComputationNodeBasePtr& rootNode);
+    void ValidateNetwork();
+    size_t ValidateNodes(list<ComputationNodeBasePtr> nodes, bool isFirstPass, bool isFinalValidationPass);
+    bool ValidateNode(ComputationNodeBasePtr node, bool isFinalValidationPass) const;
     void MarkValueNonSharableNodes();
 
 private:
     void DetermineSetOfAllRoots();
     void CollectInputAndLearnableParameters(const ComputationNodeBasePtr& rootNode);
-    bool IsCompiled() const
-    {
-        return m_isCompiled;
-    }
+    void CollectInputAndLearnableParametersRec(const ComputationNodeBasePtr& node, set<ComputationNodeBasePtr>& visited, list<ComputationNodeBasePtr>& inputs, list<ComputationNodeBasePtr>& learnableParameters);
+    bool IsCompiled() const { return m_isCompiled; }
+    bool AreMatricesAllocated() const { return m_areMatricesAllocated; }
     void VerifyIsCompiled(const char* where) const;
-    // bool BuiltAndValidatedSubNetwork(const ComputationNodeBasePtr & rootNode);
 public:
     void AllocateAllMatrices(const std::vector<ComputationNodeBasePtr>& evalRootNodes, const std::vector<ComputationNodeBasePtr>& outValueRootNodes, ComputationNodeBasePtr trainRootNode);
 
@@ -291,6 +284,7 @@ public:
 
     // this counts the actual number of frames in a minibatch (not counting gaps in parallel sequences)
     // TODO: Instead of passing numAllSamples in here, we should determine it from the inputs in case of no layout. Or simply forbid this case.
+    // BUGBUG: With variable-length sequences, this can no longer be a network method.
     size_t GetNumSamplesWithLabel(const size_t numAllSamples) const
     {
         if (m_pMBLayout)
@@ -337,9 +331,9 @@ public:
     void ReplaceLeafNode(wstring oldNodeName, ComputationNodeBasePtr newNode);
     void ReplaceFinalCriterionNode(wstring oldNodeName, ComputationNodeBasePtr newNode);
     void AddFeatureNode(ComputationNodeBasePtr featureNode);
-    void RemoveFeatureNode(ComputationNodeBasePtr featureNode);
-    void SetLearnableNodesBelowNeedGradient(const bool needGradient, const ComputationNodeBasePtr& rootNode = nullptr);
-    void SetBatchNormlizationNodesBelowEvalMode(const bool evalMode, const ComputationNodeBasePtr& rootNode = nullptr);
+    ComputationNodeBasePtr RemoveFeatureNode(ComputationNodeBasePtr featureNode);
+    void SetLearnableNodesBelowLearningRateMultiplier(const float learningRateMultiplier, const ComputationNodeBasePtr& rootNode = nullptr);
+    void SetBatchNormalizationNodesBelowEvalMode(const bool evalMode, const ComputationNodeBasePtr& rootNode = nullptr);
 
     // -----------------------------------------------------------------------
     // node access
@@ -351,22 +345,12 @@ public:
         return (iter != m_nameToNodeMap.end());
     }
 
-    ComputationNodeBasePtr GetNodeFromName(const std::wstring& name, ComputationNetwork* anotherNetwork = nullptr, bool bPanic = true) const
+    ComputationNodeBasePtr GetNodeFromName(const std::wstring& name) const
     {
         auto iter = m_nameToNodeMap.find(name);
-        if (iter != m_nameToNodeMap.end())
-        {
-            // found
-            return iter->second;
-        }
-
-        if (anotherNetwork != nullptr)
-            return anotherNetwork->GetNodeFromName(name);
-
-        if (bPanic)
+        if (iter == m_nameToNodeMap.end())
             RuntimeError("GetNodeFromName: Node name %ls does not exist.", name.c_str());
-        else
-            return nullptr;
+        return iter->second;
     }
 
     // GetNodesFromName - Get all the nodes from a name that may match a wildcard '*' pattern
@@ -401,16 +385,26 @@ public:
     }
 
     // -----------------------------------------------------------------------
+    // environment properties
+    // -----------------------------------------------------------------------
+
+    ComputationEnvironment& Environment() const { return *m_environment; }
+
+    // -----------------------------------------------------------------------
     // functions to pass on specific SGD options to nodes
     // -----------------------------------------------------------------------
 
+    // TODO: Why are all these static, but then take a network as the first argument? --> make them class members
     template <class ElemType>
     static void SetDropoutRate(ComputationNetworkPtr net, const ComputationNodeBasePtr& criterionNode, const double dropoutRate, double& prevDropoutRate, unsigned long& dropOutSeed);
 
     template <class ElemType>
+    static void SetBatchNormalizationTimeConstant(ComputationNetworkPtr net, const ComputationNodeBasePtr& criterionNode, const double normalizationTimeConstant, double& prevNormalizationTimeConstant);
+
+    template <class ElemType>
     static void SetSeqParam(ComputationNetworkPtr net,
                             const ComputationNodeBasePtr criterionNode,
-                            const double& hsmoothingWeight,
+                            const double& hsmoothingWeight, // TODO: Why are all these passed by reference?
                             const double& frameDropThresh,
                             const bool& doreferencealign,
                             const double& amf = 14.0f,
@@ -463,7 +457,6 @@ public:
     inline std::vector<ComputationNodeBasePtr> CriterionNodesFrom(const wstring& criterionNodeName)
     {
         ComputationNodeBasePtr node = GetNodeFromName(criterionNodeName);
-        ValidateSubNetwork(node);
         if (node->HasMBLayout() || node->GetSampleLayout().GetNumElements() != 1)
             InvalidArgument("%ls %ls operation is not a valid training or eval criterion node.", node->NodeName().c_str(), node->OperationName().c_str());
         return std::vector<ComputationNodeBasePtr>{node};
@@ -477,10 +470,6 @@ public:
     {
         return m_outputNodes;
     }
-    inline std::vector<ComputationNodeBasePtr>& PairNodes()
-    {
-        return m_pairNodes;
-    }
 
     // -----------------------------------------------------------------------
     // node access
@@ -491,11 +480,6 @@ public:
         return m_nameToNodeMap.size();
     }
 
-    // TODO: could be a dup
-    std::map<const std::wstring, ComputationNodeBasePtr, nocase_compare>& GetNameToNodeMap() // specially for ExperimentalNetworkBuilder; don't use this otherwise
-    {
-        return m_nameToNodeMap;
-    }
 
     std::vector<ComputationNodeBasePtr> GetAllNodes() const
     {
@@ -537,10 +521,6 @@ public:
         return nodesWithType;
     }
 
-private:
-    template <class N>
-    void GetNodesRequiringX(std::list<ComputationNodeBasePtr>& nodesRequirePreComputation, const ComputationNodeBasePtr& rootNode, bool checkComputed);
-
 public:
     // return list of nodes that require precomputation and not precomputed yet
     std::list<ComputationNodeBasePtr> GetNodesRequiringPreComputation(const ComputationNodeBasePtr& rootNode = nullptr, bool checkComputed = true);
@@ -558,6 +538,9 @@ public:
 
     template <class ElemType>
     void PerformSVDecomposition(const map<wstring, float>& SVDConfig, size_t AlignedSize);
+
+    template <class ElemType>
+    void SaveToDbnFile(ComputationNetworkPtr net, const std::wstring& fileName) const;
 
     // -----------------------------------------------------------------------
     // construction
@@ -590,15 +573,14 @@ public:
     // TODO: move these close to where they are used
 
     // add a node to m_nameToNodeMap[], which is our node holder
+    // This only adds the node to the network's node set, without considering linkage.
     // Duplicate node names are rejected.
     ComputationNodeBasePtr AddNodeToNet(const ComputationNodeBasePtr& nodePtr)
     {
-        // found
-        // TODO: use .insert() and test result.second == false means not inserted since already exists
-        if (m_nameToNodeMap.find(nodePtr->NodeName()) != m_nameToNodeMap.end())
-            RuntimeError("Duplicated computation node name.");
-
-        m_nameToNodeMap[nodePtr->NodeName()] = nodePtr;
+        auto result = m_nameToNodeMap.insert(make_pair(nodePtr->NodeName(), nodePtr));
+        if (!result.second)
+            RuntimeError("AddNodeToNet: Duplicated computation node name.");
+        nodePtr->SetEnvironment(m_environment);
         return nodePtr; // allows e.g. return AddNodeToNet(New...);
     }
     // TODO: not very nice--need to fix way more outside to get this right
@@ -616,6 +598,27 @@ public:
         // return nodePtr; // allows e.g. return AddNodeToNetAndAttachInputs(New..., inputs);
     }
 
+    // add a node to the network unless it's already there
+    // Returns false if the node was already there.
+    bool AddNodeToNetIfNotYet(const ComputationNodeBasePtr& nodePtr)
+    {
+        auto result = m_nameToNodeMap.insert(make_pair(nodePtr->NodeName(), nodePtr));
+        if (!result.second && result.first->second != nodePtr) // if there's already one under this name, it better be nodePtr
+            RuntimeError("AddNodeToNetIfNotYet: Duplicated computation node name.");
+        nodePtr->SetEnvironment(m_environment); // (note: redundant if already part of the network)
+        return result.second;
+    }
+
+    // remove a node from the network's node set
+    // This does NOT update any links referencing it, or node groups.
+    // TODO: We should verify that indeed this node is not referenced by other nodes or node groups,
+    //       nor that this node references any node inside the network.
+    ComputationNodeBasePtr RemoveNodeFromNet(const ComputationNodeBasePtr& node)
+    {
+        node->SetEnvironment(nullptr);
+        m_nameToNodeMap.erase(node->NodeName());
+        return node;
+    }
 public:
     // -----------------------------------------------------------------------
     // evaluation
@@ -642,7 +645,7 @@ public:
     // if node name is not found, dump all nodes
     // otherwise dump just that node
     // This function is called from MEL, i.e. must be prepared to operate on an uncompiled network (only m_nameToNodeMap is valid).
-    void DumpNodeInfoToFile(const std::wstring& nodeName, const bool printValues, const std::wstring outputFile, const std::wstring& nodeNameInRegEx = L"")
+    void DumpNodeInfoToFile(const std::wstring& nodeName, const bool printValues, const bool printMetadata, const std::wstring outputFile, const std::wstring& nodeNameInRegEx = L"")
     {
         if (nodeNameInRegEx.empty())
         {
@@ -652,13 +655,13 @@ public:
                              FileOptions::fileOptionsText | FileOptions::fileOptionsWrite);
 
                 const ComputationNodeBasePtr& nodePtr = GetNodeFromName(nodeName);
-                nodePtr->DumpNodeInfo(printValues, fstream);
+                nodePtr->DumpNodeInfo(printValues, printMetadata, fstream);
             }
             else // node name is not found, dump all nodes
             {
                 fprintf(stderr, "Warning: node name %ls does not exist in the network. dumping all nodes.\n",
                         nodeName.c_str());
-                DumpAllNodesToFile(printValues, outputFile);
+                DumpAllNodesToFile(printValues, printMetadata, outputFile);
             }
         }
         else
@@ -680,12 +683,13 @@ public:
                 fprintf(stderr, "\t%ls\n", x.c_str());
             }
             fprintf(stderr, "DumpNodeInfo: dumping node info (%s printing values) to %ls\n", printValues ? "with" : "without", outputFile.c_str());
-            DumpNodeInfoToFile(NodeList, printValues, outputFile);
+            DumpNodeInfoToFile(NodeList, printValues, printMetadata, outputFile);
         }
     }
 
     // dump all nodes in the network to file
     void DumpAllNodesToFile(const bool printValues,
+                            const bool printMetadata,
                             const std::wstring outputFile)
     {
         File fstream(outputFile,
@@ -694,12 +698,14 @@ public:
         for (auto nodeIter = m_nameToNodeMap.begin(); nodeIter != m_nameToNodeMap.end(); nodeIter++)
         {
             ComputationNodeBasePtr nodePtr = nodeIter->second;
-            nodePtr->DumpNodeInfo(printValues, fstream);
+            nodePtr->DumpNodeInfo(printValues, printMetadata, fstream);
         }
     }
 
+    // this one is called from MEL and from DumpNodeInfoToFile() above
     void DumpNodeInfoToFile(const vector<ComputationNodeBasePtr>& nodes,
                             const bool printValues,
+                            const bool printMetadata,
                             const std::wstring outputFile)
     {
         File fstream(outputFile,
@@ -708,7 +714,7 @@ public:
         for (auto nodeIter = nodes.begin(); nodeIter != nodes.end(); nodeIter++)
         {
             ComputationNodeBasePtr nodePtr = *nodeIter;
-            nodePtr->DumpNodeInfo(printValues, fstream);
+            nodePtr->DumpNodeInfo(printValues, printMetadata, fstream);
         }
     }
 
@@ -786,7 +792,7 @@ protected:
         virtual void AllocateGradientMatricesForInputs(MatrixPool& matrixPool);
         virtual void RequestMatricesBeforeBackprop(MatrixPool& matrixPool);
         virtual void ReleaseMatricesAfterBackprop(MatrixPool& matrixPool);
-        virtual bool IsOutputOlderThanInputs() const override;
+        virtual bool IsOutOfDateWrtInputs() const override;
 
     public:
         // std::vector<ComputationNodeBasePtr> m_nestedNodes;               // all nodes involved in this loop, in evaluation order
@@ -868,7 +874,7 @@ public:
         m_randomSeedOffset = value;
     }
 
-protected:
+private://protected:
     DEVICEID_TYPE m_deviceId; // TODO: is this shared by all nodes?
     unsigned long m_randomSeedOffset;
 
@@ -877,22 +883,24 @@ protected:
 
     // node groups
     // These are specified by the user by means of tags or explicitly listing the node groups.
+    // TODO: Are these meant to be disjoint?
     std::vector<ComputationNodeBasePtr> m_features;
     std::vector<ComputationNodeBasePtr> m_labels;
     std::vector<ComputationNodeBasePtr> m_finalCriteria;
     std::vector<ComputationNodeBasePtr> m_evalNodes;
     std::vector<ComputationNodeBasePtr> m_outputNodes;
-    std::vector<ComputationNodeBasePtr> m_pairNodes;                // nodes for the children network to pair
     vector<std::vector<ComputationNodeBasePtr>*> GetAllNodeGroups() // get all groups to allow to iterate over all of them ...continue
     {
-        return vector<std::vector<ComputationNodeBasePtr>*>{&m_features, &m_labels, &m_finalCriteria, &m_evalNodes, &m_outputNodes, &m_pairNodes};
+        return vector<std::vector<ComputationNodeBasePtr>*>{&m_features, &m_labels, &m_finalCriteria, &m_evalNodes, &m_outputNodes};
     }
 
     // used for sentence boundary information passed from reader to reset RNN state
     // specify how the minibatch is packed for each sample
-    // TODO: This will change once we allow for multiple inconsistent layouts.
+    // BUGBUG: With variable-length inconsistent layouts, this can no longer be a network property.
     MBLayoutPtr m_pMBLayout; // note that this must be installed before doing anything that needs it (default leaves a nullptr)
 
+    // environment information that nodes may want to inquire, e.g. to know whether we are training
+    ComputationEnvironmentPtr m_environment;
 private:
     // -----------------------------------------------------------------------
     // the following members are all result of post-processing by CompileNetwork()
@@ -906,6 +914,7 @@ private:
 
     // cache for evaluation ordering:
     bool m_isCompiled; // CompileNetwork has been called
+    bool m_areMatricesAllocated; // AllocateAllMatrices has been called
 
     // cached network iterations
     std::map<const ComputationNodeBasePtr, std::list<ComputationNodeBasePtr>> m_evalOrders; // [out node] flat depth-first traversal starting from out node
@@ -929,8 +938,5 @@ template class Matrix<double>;
 // TODOs:
 //  - automatic inference of time window w.r.t. delay nodes (and related nodes such as a temporal pooling)
 //  - have overrides of RuntimeError etc. in ComputationNode, which prepend the error string with the node name and operation
-//  - code prettification:
-//     - sort all node implementations' methods into the same order; esp, ForwardProp() comes before partial
-//     - sort important nodes first; move unused/experimental nodes into source files named accordingly
 
 } } }

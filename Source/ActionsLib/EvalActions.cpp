@@ -43,7 +43,7 @@ using namespace Microsoft::MSR::CNTK;
 // ===========================================================================
 
 template <typename ElemType>
-static void DoEvalBase(const ConfigParameters& config, IDataReader<ElemType>& reader)
+static void DoEvalBase(const ConfigParameters& config, IDataReader& reader)
 {
     DEVICEID_TYPE deviceId = DeviceFromConfig(config);
     ConfigArray minibatchSize = config(L"minibatchSize", "40960");
@@ -57,6 +57,8 @@ static void DoEvalBase(const ConfigParameters& config, IDataReader<ElemType>& re
 
     int traceLevel = config(L"traceLevel", "0");
     size_t numMBsToShowResult = config(L"numMBsToShowResult", "100");
+    size_t maxSamplesInRAM = config(L"maxSamplesInRAM", (size_t)SIZE_MAX);
+    size_t numSubminiBatches = config(L"numSubminibatches", (size_t)1);
 
     ConfigArray evalNodeNames = config(L"evalNodeNames", "");
     vector<wstring> evalNodeNamesVector;
@@ -66,8 +68,8 @@ static void DoEvalBase(const ConfigParameters& config, IDataReader<ElemType>& re
     }
 
     auto net = ComputationNetwork::CreateFromFile<ElemType>(deviceId, modelPath);
-
-    SimpleEvaluator<ElemType> eval(net, numMBsToShowResult, traceLevel);
+    
+    SimpleEvaluator<ElemType> eval(net, MPIWrapper::GetInstance(), numMBsToShowResult, traceLevel, maxSamplesInRAM, numSubminiBatches);
     eval.Evaluate(&reader, evalNodeNamesVector, mbSize[0], epochSize);
 }
 
@@ -78,9 +80,9 @@ void DoEval(const ConfigParameters& config)
     ConfigParameters readerConfig(config(L"reader"));
     readerConfig.Insert("traceLevel", config(L"traceLevel", "0"));
 
-    DataReader<ElemType> testDataReader(readerConfig);
+    DataReader testDataReader(readerConfig);
 
-    DoEvalBase(config, testDataReader);
+    DoEvalBase<ElemType>(config, testDataReader);
 }
 
 template void DoEval<double>(const ConfigParameters& config);
@@ -114,6 +116,8 @@ void DoCrossValidate(const ConfigParameters& config)
 
     int traceLevel = config(L"traceLevel", "0");
     size_t numMBsToShowResult = config(L"numMBsToShowResult", "100");
+    size_t maxSamplesInRAM = config(L"maxSamplesInRAM", (size_t)SIZE_MAX);
+    size_t numSubminiBatches = config(L"numSubminibatches", (size_t)1);
 
     ConfigArray evalNodeNames = config(L"evalNodeNames", "");
     vector<wstring> evalNodeNamesVector;
@@ -125,7 +129,7 @@ void DoCrossValidate(const ConfigParameters& config)
     std::vector<std::vector<double>> cvErrorResults;
     std::vector<std::wstring> cvModels;
 
-    DataReader<ElemType> cvDataReader(readerConfig);
+    DataReader cvDataReader(readerConfig);
 
     bool finalModelEvaluated = false;
     for (size_t i = cvInterval[0]; i <= cvInterval[2]; i += cvInterval[1])
@@ -146,8 +150,8 @@ void DoCrossValidate(const ConfigParameters& config)
 
         cvModels.push_back(cvModelPath);
         auto net = ComputationNetwork::CreateFromFile<ElemType>(deviceId, cvModelPath);
-
-        SimpleEvaluator<ElemType> eval(net, numMBsToShowResult, traceLevel);
+        
+        SimpleEvaluator<ElemType> eval(net, MPIWrapper::GetInstance(), numMBsToShowResult, traceLevel, maxSamplesInRAM, numSubminiBatches);
 
         fprintf(stderr, "model %ls --> \n", cvModelPath.c_str());
         auto evalErrors = eval.Evaluate(&cvDataReader, evalNodeNamesVector, mbSize[0], epochSize);
@@ -206,11 +210,9 @@ void DoWriteOutput(const ConfigParameters& config)
     readerConfig.Insert("traceLevel", config(L"traceLevel", "0"));
     readerConfig.Insert("randomize", "None"); // we don't want randomization when output results
 
-    DataReader<ElemType> testDataReader(readerConfig);
+    DataReader testDataReader(readerConfig);
 
-    DEVICEID_TYPE deviceId = DeviceFromConfig(config);
     ConfigArray minibatchSize = config(L"minibatchSize", "2048");
-    wstring modelPath = config(L"modelPath");
     intargvector mbSize = minibatchSize;
 
     size_t epochSize = config(L"epochSize", "0");
@@ -219,14 +221,9 @@ void DoWriteOutput(const ConfigParameters& config)
         epochSize = requestDataSize;
     }
 
-    ConfigArray outputNodeNames = config(L"outputNodeNames", "");
     vector<wstring> outputNodeNamesVector;
-    for (int i = 0; i < outputNodeNames.size(); ++i)
-    {
-        outputNodeNamesVector.push_back(outputNodeNames[i]);
-    }
 
-    auto net = ComputationNetwork::CreateFromFile<ElemType>(deviceId, modelPath);
+    auto net = GetModelFromConfig<ConfigParameters, ElemType>(config, outputNodeNamesVector);
 
     SimpleOutputWriter<ElemType> writer(net, 1);
 
@@ -234,15 +231,42 @@ void DoWriteOutput(const ConfigParameters& config)
     {
         ConfigParameters writerConfig(config(L"writer"));
         bool bWriterUnittest = writerConfig(L"unittest", "false");
-        DataWriter<ElemType> testDataWriter(writerConfig);
+        DataWriter testDataWriter(writerConfig);
         writer.WriteOutput(testDataReader, mbSize[0], testDataWriter, outputNodeNamesVector, epochSize, bWriterUnittest);
     }
     else if (config.Exists("outputPath"))
     {
-        wstring outputPath = config(L"outputPath"); // crashes if no default given?
-        writer.WriteOutput(testDataReader, mbSize[0], outputPath, outputNodeNamesVector, epochSize);
+        wstring outputPath = config(L"outputPath");
+
+        // gather additional formatting options
+        typename decltype(writer)::WriteFormattingOptions formattingOptions;
+        if (config.Exists("format"))
+        {
+            ConfigParameters formatConfig(config(L"format"));
+            if (formatConfig.ExistsCurrent("type")) // do not inherit 'type' from outer block
+            {
+                string type = formatConfig(L"type");
+                if      (type == "real")     formattingOptions.isCategoryLabel = false;
+                else if (type == "category") formattingOptions.isCategoryLabel = true;
+                else                         InvalidArgument("write: type must be 'real' or 'category'");
+                if (formattingOptions.isCategoryLabel)
+                    formattingOptions.labelMappingFile = (wstring)formatConfig(L"labelMappingFile", L"");
+            }
+            formattingOptions.transpose         = formatConfig(L"transpose",         formattingOptions.transpose);
+            formattingOptions.prologue          = formatConfig(L"prologue",          formattingOptions.prologue);
+            formattingOptions.epilogue          = formatConfig(L"epilogue",          formattingOptions.epilogue);
+            formattingOptions.sequenceSeparator = formatConfig(L"sequenceSeparator", formattingOptions.sequenceSeparator);
+            formattingOptions.sequencePrologue  = formatConfig(L"sequencePrologue",  formattingOptions.sequencePrologue);
+            formattingOptions.sequenceEpilogue  = formatConfig(L"sequenceEpilogue",  formattingOptions.sequenceEpilogue);
+            formattingOptions.elementSeparator  = formatConfig(L"elementSeparator",  formattingOptions.elementSeparator);
+            formattingOptions.sampleSeparator   = formatConfig(L"sampleSeparator",   formattingOptions.sampleSeparator);
+            formattingOptions.precisionFormat   = formatConfig(L"precisionFormat",   formattingOptions.precisionFormat);
+        }
+
+        writer.WriteOutput(testDataReader, mbSize[0], outputPath, outputNodeNamesVector, formattingOptions, epochSize);
     }
-    // writer.WriteOutput(testDataReader, mbSize[0], testDataWriter, outputNodeNamesVector, epochSize);
+    else
+        InvalidArgument("write command: You must specify either 'writer'or 'outputPath'");
 }
 
 template void DoWriteOutput<float>(const ConfigParameters& config);

@@ -149,8 +149,11 @@ public:
         Base::Save(fstream);
 
         fstream << m_timeStep;
-        size_t colsDummy = 0;
-        fstream << GetSampleMatrixNumRows() << colsDummy; // #rows saved for legacy file format
+#if CURRENT_CNTK_MODEL_VERSION > CNTK_MODEL_VERSION_3
+        m_sampleLayout.Save(fstream);
+#else
+        fstream << GetSampleLayout().GetNumElements() << (size_t)0; // used to be (rows,cols); no need since inferred in Validate(), and wrong for non-matrix tensors
+#endif
 
         fstream << m_initialActivationValue;
     }
@@ -162,11 +165,22 @@ public:
 
         fstream >> m_timeStep;
 
-        size_t rows, colsDummy;
-        fstream >> rows >> colsDummy;
-
-        SetDims(TensorShape(rows), HasMBLayout() /*may be true on reload (roll-back)*/); // tensor shape will be overwritten in Validate()  --TODO: We should serialize it here.
-        m_delayedValue.Resize(rows, 0);                                                  // Note: If we try to access history in first minibatch, we shall crash. It would be a consequence of a missing sentence-begin flag
+        if (modelVersion > CNTK_MODEL_VERSION_3)
+        {
+            TensorShape sampleLayout;
+            sampleLayout.Load(fstream);
+            SetDims(sampleLayout, HasMBLayout() /*may be true on reload (roll-back)*/);
+        }
+        else
+        {
+            size_t rows, colsDummy;
+            fstream >> rows >> colsDummy;
+            // legacy format: if #rows matches then assume current tensor shape is up to date
+            // BUGBUG: This fails for non-column tensors. It should be sufficient to set
+            //         these to 0 and rely on Validate(), but some unknown nodes in the loop don't do that right.
+            SetDims(TensorShape(rows), HasMBLayout() /*may be true on reload (roll-back)*/); // tensor shape will be overwritten in Validate()
+        }
+        m_delayedValue.Resize(m_sampleLayout.GetNumElements(), 0); // Note: If we try to access history in first minibatch, we shall crash. It would be a consequence of a missing sentence-begin flag
 
         if (modelVersion >= CNTK_MODEL_VERSION_2)
             fstream >> m_initialActivationValue;
@@ -229,20 +243,8 @@ public:
         }
     }
 
-    virtual bool OutputUsedInComputingInputNodesGradients() const override
-    {
-        // The DelayedValueNode does not require its output value for computing
-        // the gradients of its input nodes
-        return false;
-    }
-
-    virtual bool InputUsedInComputingInputNodesGradients(size_t childIndex) const override
-    {
-        // The DelayedValueNode does not require any of it's input's values for computing
-        // the gradients of its input nodes
-        UNREFERENCED_PARAMETER(childIndex);
-        return false;
-    }
+    virtual bool OutputUsedInComputingInputNodesGradients() const override { return false; }
+    virtual bool InputUsedInComputingInputNodesGradients(size_t /*childIndex*/) const override { return false; }
 
     virtual void EndForwardProp() override // called after last iteration step of ForwardProp()
     {
@@ -254,7 +256,7 @@ public:
         //  - we don't need to keep anything if all sequences are closed (sentence end)
         //    This condition includes full-sequence mode.
         // TODO: Can we optimize this and only copy if there is a sequence spanning across the end of the MB? And add a check to BeginForwardProp() to make sure we got one if there is a boundary at the start?
-        m_delayedValue = Input(0)->Value();
+        m_delayedValue.SetValue(Input(0)->Value());
         if (!m_delayedActivationMBLayout)
             m_delayedActivationMBLayout = make_shared<MBLayout>();
         m_delayedActivationMBLayout->CopyFrom(m_pMBLayout);
@@ -292,7 +294,7 @@ public:
         size_t t = fr.t();
         int t_delayed = (int) (t + direction * m_timeStep); // this might end up outside the current window
 
-        Matrix<ElemType> inp; // ((DEVICEID_TYPE)m_value.GetDeviceId());
+        Matrix<ElemType> inp((DEVICEID_TYPE)m_value->GetDeviceId());
 
         // if any sequence at this time step has a boundary flag, then process one by one
         // TODO: Would there be an efficiency gain from grouping consecutive sequences with identical flags?
@@ -329,9 +331,30 @@ public:
             Matrix<ElemType> out = ValueFor(fr);
 
             if (t_delayed < 0)
-                inp = DataWithMBLayoutFor(m_delayedValue, FrameRange(m_delayedActivationMBLayout, t_delayed + T_delayedActivation), m_delayedActivationMBLayout);
+            {
+                if (m_delayedValue.IsEmpty()) 
+                {
+                    if (IsPartOfLoop())
+                        InvalidArgument("The delay node tries to access past values that are out of bound, possibly because there is no sentence start marker in the MBLayout.");
+                    else //use first frame
+                        inp = Input(0)->ValueFor(FrameRange(m_pMBLayout, 0));
+                }
+                else
+                    inp = DataWithMBLayoutFor(m_delayedValue, FrameRange(m_delayedActivationMBLayout, t_delayed + T_delayedActivation), m_delayedActivationMBLayout);
+            }
+
             else if (t_delayed >= T)
-                inp = DataWithMBLayoutFor(m_delayedValue, FrameRange(m_delayedActivationMBLayout, t_delayed - T), m_delayedActivationMBLayout);
+            {
+                if (m_delayedValue.IsEmpty())  
+                {
+                    if (IsPartOfLoop())
+                        InvalidArgument("The delay node tries to access future values that are out of bound, possibly because there is no sentence end marker in the MBLayout.");
+                    else //use last frame
+                        inp = Input(0)->ValueFor(FrameRange(m_pMBLayout, T - 1));
+                }
+                else
+                    inp = DataWithMBLayoutFor(m_delayedValue, FrameRange(m_delayedActivationMBLayout, t_delayed - T), m_delayedActivationMBLayout);
+            }
             else
                 inp = Input(0)->ValueFor(frDelayed);
             // inp = Input(0)->ValueFor(FrameRange(m_pMBLayout, t_delayed));
@@ -358,7 +381,7 @@ public:
             auto node = dynamic_pointer_cast<DelayedValueNodeBase<ElemType, direction /*, SequenceStart_or_End*/>>(nodeP);
             node->m_timeStep = m_timeStep;
             node->m_initialActivationValue = m_initialActivationValue;
-            node->m_delayedValue = m_delayedValue;
+            node->m_delayedValue.SetValue(m_delayedValue);
             if (m_delayedActivationMBLayout)
                 (node->m_delayedActivationMBLayout = make_shared<MBLayout>())->CopyFrom(m_delayedActivationMBLayout);
             else
@@ -1159,4 +1182,4 @@ protected:
 
 #endif
 
-} } }
+}}}
